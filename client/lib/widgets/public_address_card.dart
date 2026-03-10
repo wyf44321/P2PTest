@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/providers/self_info_provider.dart';
+
 
 class PublicAddressCard extends StatelessWidget {
   final VoidCallback? onSettingsTap;
@@ -16,8 +18,10 @@ class PublicAddressCard extends StatelessWidget {
     return Consumer<SelfInfoProvider>(
       builder: (context, provider, _) {
         final publicAddr = provider.publicAddress;
+        final publicAddrWithMeta = provider.selfInfo.publicAddressWithMeta;
         final candidateStr = provider.candidateString;
         final ipLocation = provider.ipLocation;
+        final natType = provider.natType;
 
         return Card(
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -58,26 +62,35 @@ class PublicAddressCard extends StatelessWidget {
                   context,
                   label: '公网',
                   address: publicAddr,
+                  copyValue: publicAddrWithMeta,
                   theme: theme,
                   isPrimary: true,
                 ),
                 if (publicAddr.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const SizedBox(width: 36),
-                      Icon(
-                        Icons.location_on_outlined,
-                        size: 16,
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        ipLocation ?? '查询中...',
-                        style: theme.textTheme.bodySmall?.copyWith(
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Icon(
+                          Icons.location_on_outlined,
+                          size: 16,
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          ipLocation?.replaceAll('/', '\n') ?? '查询中...',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      _buildNatTypeBadge(theme, natType, provider.selfInfo),
                     ],
                   ),
                 ],
@@ -142,6 +155,7 @@ class PublicAddressCard extends StatelessWidget {
     BuildContext context, {
     required String label,
     required String address,
+    String? copyValue,
     required ThemeData theme,
     required bool isPrimary,
   }) {
@@ -174,11 +188,53 @@ class PublicAddressCard extends StatelessWidget {
         if (address.isNotEmpty)
           IconButton(
             icon: const Icon(Icons.copy, size: 18),
-            onPressed: () => _copyAddress(context, address),
+            onPressed: () => _copyAddress(context, copyValue ?? address),
             tooltip: '复制${isPrimary ? "公网" : "内网"}地址',
             visualDensity: VisualDensity.compact,
           ),
       ],
+    );
+  }
+
+  Widget _buildNatTypeBadge(ThemeData theme, NatType natType, SelfInfo info) {
+    final Color bgColor;
+    final Color fgColor;
+    switch (natType) {
+      case NatType.cone:
+        bgColor = Colors.green.withValues(alpha: 0.12);
+        fgColor = Colors.green.shade700;
+        break;
+      case NatType.symmetric:
+        bgColor = Colors.orange.withValues(alpha: 0.12);
+        fgColor = Colors.orange.shade800;
+        break;
+      case NatType.unknown:
+        bgColor = Colors.grey.withValues(alpha: 0.12);
+        fgColor = Colors.grey.shade600;
+        break;
+    }
+
+    final tooltip = natType == NatType.symmetric
+        ? info.portPredictionHint
+        : natType.hint;
+
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Text(
+          natType.shortLabel,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: fgColor,
+            fontWeight: FontWeight.w600,
+            fontSize: 11,
+          ),
+        ),
+      ),
     );
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'package:p2p_test/models/peer_candidate.dart';
+import 'package:p2p_test/models/self_info.dart';
 
 enum ConnectionStatus {
   connecting,
@@ -62,6 +63,9 @@ class MonitoredPeer {
   final DateTime createdAt;
   final DateTime? lastConnectedAt;
   final int reconnectCount;
+  final NatType peerNatType;
+  final int? peerPortDelta;
+  final bool peerIsConsistentDelta;
 
   const MonitoredPeer({
     required this.id,
@@ -77,6 +81,9 @@ class MonitoredPeer {
     required this.createdAt,
     this.lastConnectedAt,
     this.reconnectCount = 0,
+    this.peerNatType = NatType.unknown,
+    this.peerPortDelta,
+    this.peerIsConsistentDelta = false,
   });
 
   /// The primary display address (first public or first candidate).
@@ -122,6 +129,8 @@ class MonitoredPeer {
     return status.label;
   }
 
+  bool get usePeerPortPrediction => peerNatType == NatType.symmetric;
+
   MonitoredPeer copyWith({
     String? id,
     String? ip,
@@ -136,6 +145,9 @@ class MonitoredPeer {
     DateTime? createdAt,
     DateTime? lastConnectedAt,
     int? reconnectCount,
+    NatType? peerNatType,
+    int? peerPortDelta,
+    bool? peerIsConsistentDelta,
     bool clearRtt = false,
     bool clearPacketLoss = false,
     bool clearActive = false,
@@ -154,6 +166,10 @@ class MonitoredPeer {
       createdAt: createdAt ?? this.createdAt,
       lastConnectedAt: lastConnectedAt ?? this.lastConnectedAt,
       reconnectCount: reconnectCount ?? this.reconnectCount,
+      peerNatType: peerNatType ?? this.peerNatType,
+      peerPortDelta: peerPortDelta ?? this.peerPortDelta,
+      peerIsConsistentDelta:
+          peerIsConsistentDelta ?? this.peerIsConsistentDelta,
     );
   }
 

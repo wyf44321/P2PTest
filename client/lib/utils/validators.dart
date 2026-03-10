@@ -1,4 +1,20 @@
 import 'package:p2p_test/models/peer_candidate.dart';
+import 'package:p2p_test/models/self_info.dart';
+
+/// Parsed result of a candidate string that may include NAT metadata.
+class ParsedCandidateInput {
+  final List<PeerCandidate> candidates;
+  final NatType peerNatType;
+  final int? peerPortDelta;
+  final bool peerIsConsistentDelta;
+
+  const ParsedCandidateInput({
+    required this.candidates,
+    this.peerNatType = NatType.unknown,
+    this.peerPortDelta,
+    this.peerIsConsistentDelta = false,
+  });
+}
 
 class Validators {
   Validators._();
@@ -72,13 +88,22 @@ class Validators {
     return false;
   }
 
+  /// Split raw input into the address part and optional metadata part.
+  static (String addrs, String? meta) _splitMeta(String value) {
+    final pipeIdx = value.indexOf('|');
+    if (pipeIdx < 0) return (value, null);
+    return (value.substring(0, pipeIdx), value.substring(pipeIdx + 1));
+  }
+
   /// Parse a candidate string like "192.168.1.100:12345,1.2.3.4:50001"
+  /// or "192.168.1.100:12345,1.2.3.4:50001|sym,d=2,c=1"
   /// into a list of PeerCandidate. Returns null if the string is invalid.
   static List<PeerCandidate>? parseCandidates(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return null;
 
-    final segments = trimmed.split(',');
+    final (addrPart, _) = _splitMeta(trimmed);
+    final segments = addrPart.split(',');
     final candidates = <PeerCandidate>[];
 
     for (final seg in segments) {
@@ -88,6 +113,50 @@ class Validators {
     }
 
     return candidates.isEmpty ? null : candidates;
+  }
+
+  /// Parse a candidate string with optional NAT metadata.
+  /// Returns null if the address part is invalid.
+  static ParsedCandidateInput? parseCandidateInput(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+
+    final (addrPart, metaPart) = _splitMeta(trimmed);
+    final candidates = <PeerCandidate>[];
+
+    for (final seg in addrPart.split(',')) {
+      final parsed = parseIpPort(seg.trim());
+      if (parsed == null) return null;
+      candidates.add(PeerCandidate(parsed.ip, parsed.port));
+    }
+    if (candidates.isEmpty) return null;
+
+    var natType = NatType.unknown;
+    int? portDelta;
+    bool isConsistent = false;
+
+    if (metaPart != null && metaPart.isNotEmpty) {
+      final tokens = metaPart.split(',');
+      for (final token in tokens) {
+        final t = token.trim();
+        if (t == 'sym') {
+          natType = NatType.symmetric;
+        } else if (t == 'cone') {
+          natType = NatType.cone;
+        } else if (t.startsWith('d=')) {
+          portDelta = int.tryParse(t.substring(2));
+        } else if (t.startsWith('c=')) {
+          isConsistent = t.substring(2) == '1';
+        }
+      }
+    }
+
+    return ParsedCandidateInput(
+      candidates: candidates,
+      peerNatType: natType,
+      peerPortDelta: portDelta,
+      peerIsConsistentDelta: isConsistent,
+    );
   }
 
   /// Validate a candidate string for form fields.

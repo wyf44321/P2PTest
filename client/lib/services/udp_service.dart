@@ -26,6 +26,7 @@ class UdpService {
   RawDatagramSocket? _socket;
   UdpEventListener? _listener;
   void Function(Datagram datagram)? _stunResponseHandler;
+  void Function(String ip, int port)? onIncomingPeerConnected;
 
   final Set<String> _connectedPeers = {};
   final List<_PunchOperation> _activePunchOps = [];
@@ -91,27 +92,49 @@ class UdpService {
   }
 
   void _handlePunchMessage(String addr, String ip, int port) {
-    AppLogger.debug(_tag, 'Received punch from $addr');
+    AppLogger.info(_tag, 'Received punch from $addr');
+    final isNew = !_connectedPeers.contains(addr);
     _connectedPeers.add(addr);
     sendMessage(ip, port, 'punch_ack', {
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     });
-    _completePunchOps(addr);
+    final matched = _completePunchOps(addr, ip);
+    if (isNew && !matched) {
+      onIncomingPeerConnected?.call(ip, port);
+    }
   }
 
   void _handlePunchAck(String addr) {
-    AppLogger.debug(_tag, 'Received punch_ack from $addr');
+    final ip = addr.split(':').first;
+    AppLogger.info(_tag, 'Received punch_ack from $addr');
     _connectedPeers.add(addr);
-    _completePunchOps(addr);
+    _completePunchOps(addr, ip);
   }
 
-  void _completePunchOps(String addr) {
+  bool _completePunchOps(String addr, String ip) {
     for (final op in _activePunchOps) {
-      if (op.targets.contains(addr) && !op.completer.isCompleted) {
+      if (op.completer.isCompleted) continue;
+
+      // Exact match (including predicted ports).
+      if (op.targets.contains(addr)) {
         op.successAddr = addr;
         op.completer.complete(true);
+        return true;
+      }
+
+      // IP-only match: the peer is behind symmetric NAT so the actual source
+      // port differs from the STUN-reported port. Accept any port from a
+      // target IP we are actively punching.
+      final targetIps = op.targets.map((a) => a.split(':').first).toSet();
+      if (targetIps.contains(ip)) {
+        AppLogger.info(_tag,
+            'Accepted punch from $addr via IP-only match (symmetric NAT)');
+        op.successAddr = addr;
+        op.completer.complete(true);
+        return true;
       }
     }
+    return false;
   }
 
   void sendMessage(
@@ -131,10 +154,16 @@ class UdpService {
 
   /// Attempt hole punch to multiple candidate addresses simultaneously.
   /// Returns the [PeerCandidate] that successfully connected, or null on timeout.
-  /// Supports multiple concurrent operations without interference.
+  /// When [enablePortPrediction] is true, predicted ports around each candidate
+  /// are tried after [AppConstants.portPredictionDelay].
+  /// [isConsistentDelta] controls whether a narrow (delta-step) or wide
+  /// (sequential scan) prediction range is used.
   Future<PeerCandidate?> holePunchMultiCandidate(
     List<PeerCandidate> candidates, {
     int? timeoutSec,
+    bool enablePortPrediction = false,
+    int? portDelta,
+    bool isConsistentDelta = false,
   }) async {
     final timeout =
         timeoutSec ?? AppConstants.holePunchTimeout.inSeconds;
@@ -148,7 +177,18 @@ class UdpService {
       }
     }
 
-    final op = _PunchOperation(targetAddrs);
+    // When port prediction is active, also accept connections from predicted
+    // ports so that _completePunchOps can match them.
+    final predictedCandidates = enablePortPrediction
+        ? _buildPredictedCandidates(candidates, portDelta,
+            isConsistentDelta: isConsistentDelta)
+        : <PeerCandidate>[];
+    final allTargetAddrs = {
+      ...targetAddrs,
+      ...predictedCandidates.map((c) => c.address),
+    };
+
+    final op = _PunchOperation(allTargetAddrs);
     _activePunchOps.add(op);
 
     void sendPunchToAll() {
@@ -159,9 +199,23 @@ class UdpService {
       }
     }
 
+    void sendPunchToPredicted() {
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      for (final candidate in predictedCandidates) {
+        sendMessage(candidate.ip, candidate.port, 'punch', {
+          'timestamp': ts,
+        });
+      }
+    }
+
     sendPunchToAll();
 
     final deadline = DateTime.now().add(Duration(seconds: timeout));
+    final predictionStart =
+        DateTime.now().add(AppConstants.portPredictionDelay);
+
+    int punchCount = 0;
+    int predictedPunchCount = 0;
 
     Timer.periodic(AppConstants.holePunchInterval, (timer) {
       if (op.completer.isCompleted) {
@@ -170,16 +224,30 @@ class UdpService {
       }
       if (DateTime.now().isAfter(deadline)) {
         timer.cancel();
+        AppLogger.warning(_tag,
+            'Hole punch deadline reached after $punchCount rounds '
+            '(predicted: $predictedPunchCount rounds)');
         if (!op.completer.isCompleted) {
           op.completer.complete(false);
         }
         return;
       }
+      punchCount++;
       sendPunchToAll();
+      if (enablePortPrediction && DateTime.now().isAfter(predictionStart)) {
+        predictedPunchCount++;
+        sendPunchToPredicted();
+      }
     });
 
-    AppLogger.info(_tag,
-        'Starting hole punch to ${candidates.map((c) => c.address).join(", ")}');
+    final logMsg = enablePortPrediction
+        ? 'Starting hole punch (port prediction ON, '
+            'delta=${portDelta ?? "auto"}, '
+            'consistent=$isConsistentDelta, '
+            'predicted ports: ${predictedCandidates.length}) to '
+            '${candidates.map((c) => c.address).join(", ")}'
+        : 'Starting hole punch to ${candidates.map((c) => c.address).join(", ")}';
+    AppLogger.info(_tag, logMsg);
 
     final result = await op.completer.future;
     _activePunchOps.remove(op);
@@ -193,6 +261,64 @@ class UdpService {
 
     AppLogger.warning(_tag, 'Hole punch timeout');
     return null;
+  }
+
+  /// Build extra candidates around each original candidate for port prediction.
+  ///
+  /// Strategy adapts based on NAT allocation pattern:
+  /// - **Consistent delta**: step in multiples of [portDelta] with a narrow
+  ///   range – higher confidence, fewer packets.
+  /// - **Inconsistent / unknown delta**: combine delta-step guesses with a
+  ///   sequential ±1 scan over a wider range.
+  static List<PeerCandidate> _buildPredictedCandidates(
+    List<PeerCandidate> originals,
+    int? portDelta, {
+    bool isConsistentDelta = false,
+  }) {
+    final result = <PeerCandidate>{};
+
+    void addIfValid(String ip, int port) {
+      if (port > 0 && port <= 65535) result.add(PeerCandidate(ip, port));
+    }
+
+    for (final c in originals) {
+      if (portDelta != null && portDelta != 0 && isConsistentDelta) {
+        // --- Consistent allocation: focused delta-step prediction ---
+        final range = AppConstants.portPredictionRangeConsistent;
+        final step = portDelta.abs();
+        final sign = portDelta > 0 ? 1 : -1;
+        for (int i = 1; i <= range; i++) {
+          addIfValid(c.ip, c.port + sign * step * i);
+          addIfValid(c.ip, c.port - sign * step * i);
+        }
+      } else if (portDelta != null && portDelta != 0) {
+        // --- Inconsistent allocation: delta guesses + sequential scan ---
+        final range = AppConstants.portPredictionRangeWide;
+        final step = portDelta.abs();
+
+        // Delta-based predictions (higher priority candidates).
+        for (int i = 1; i <= range ~/ 2; i++) {
+          addIfValid(c.ip, c.port + step * i);
+          addIfValid(c.ip, c.port - step * i);
+        }
+        // Fill in with sequential ±1 scan to cover irregular jumps.
+        for (int d = 1; d <= range; d++) {
+          addIfValid(c.ip, c.port + d);
+          addIfValid(c.ip, c.port - d);
+        }
+      } else {
+        // --- No delta info: pure sequential scan ---
+        final range = AppConstants.portPredictionRangeWide;
+        for (int d = 1; d <= range; d++) {
+          addIfValid(c.ip, c.port + d);
+          addIfValid(c.ip, c.port - d);
+        }
+      }
+    }
+
+    final originalAddrs = originals.map((c) => c.address).toSet();
+    result.removeWhere((c) => originalAddrs.contains(c.address));
+    return result.toList();
   }
 
   /// Convenience wrapper: single-address hole punch (backward compatible).

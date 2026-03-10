@@ -47,9 +47,9 @@ class _P2PTestAppState extends State<P2PTestApp> with WidgetsBindingObserver {
 
     _peerProvider = PeerProvider(
       udpService: _udpService,
-      storageService: _storageService,
       monitorService: _monitorService,
       ipGeoService: _ipGeoService,
+      selfInfoProvider: _selfInfoProvider,
     );
 
     _startup();
@@ -58,10 +58,9 @@ class _P2PTestAppState extends State<P2PTestApp> with WidgetsBindingObserver {
   Future<void> _startup() async {
     await _selfInfoProvider.initialize();
 
-    // Load saved peers and start monitoring once STUN succeeds
     _selfInfoProvider.addListener(_onStunStatusChanged);
     if (_selfInfoProvider.stunStatus == StunStatus.success) {
-      await _loadPeersAndStartMonitor();
+      _startMonitor();
     }
   }
 
@@ -69,13 +68,12 @@ class _P2PTestAppState extends State<P2PTestApp> with WidgetsBindingObserver {
 
   void _onStunStatusChanged() {
     if (_selfInfoProvider.stunStatus == StunStatus.success && !_peersLoaded) {
-      _loadPeersAndStartMonitor();
+      _startMonitor();
     }
   }
 
-  Future<void> _loadPeersAndStartMonitor() async {
+  void _startMonitor() {
     _peersLoaded = true;
-    await _peerProvider.loadSavedPeers();
     _monitorService.startTimers();
   }
 

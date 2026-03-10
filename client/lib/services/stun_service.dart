@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:p2p_test/config/constants.dart';
 import 'package:p2p_test/config/stun_servers.dart';
+import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/services/udp_service.dart';
 import 'package:p2p_test/utils/logger.dart';
 
@@ -16,6 +17,32 @@ class StunResult {
 
   @override
   String toString() => '$publicIp:$publicPort';
+}
+
+class NatDetectionResult {
+  final NatType natType;
+  final StunResult primaryResult;
+  final StunResult? secondaryResult;
+  final int? portDelta;
+
+  /// All mapped ports observed from successive STUN queries.
+  final List<int> portSamples;
+
+  /// Deltas between consecutive port samples (length = portSamples.length - 1).
+  final List<int> portDeltas;
+
+  /// Whether the observed deltas are consistent enough for confident prediction.
+  final bool isConsistentDelta;
+
+  NatDetectionResult({
+    required this.natType,
+    required this.primaryResult,
+    this.secondaryResult,
+    this.portDelta,
+    this.portSamples = const [],
+    this.portDeltas = const [],
+    this.isConsistentDelta = false,
+  });
 }
 
 class StunService {
@@ -45,16 +72,22 @@ class StunService {
 
     final effectiveTimeout = timeout ?? AppConstants.stunTimeout;
 
-    final List<InternetAddress> addrs;
+    final List<InternetAddress> allAddrs;
     try {
-      addrs = await InternetAddress.lookup(stunHost)
+      allAddrs = await InternetAddress.lookup(stunHost)
           .timeout(const Duration(seconds: 3));
     } catch (e) {
       throw Exception('DNS lookup failed for $stunHost: $e');
     }
 
+    // Socket is bound to IPv4 — must filter out IPv6 addresses to avoid
+    // "Operation not permitted" when sending IPv6 on an IPv4 socket.
+    final addrs = allAddrs
+        .where((a) => a.type == InternetAddressType.IPv4)
+        .toList();
+
     if (addrs.isEmpty) {
-      throw Exception('DNS lookup returned empty for $stunHost');
+      throw Exception('No IPv4 address found for $stunHost');
     }
 
     final addr = addrs.first;
@@ -73,12 +106,10 @@ class StunService {
     });
 
     udpService.setStunResponseHandler((datagram) {
-      if (datagram.address.address != addr.address ||
-          datagram.port != stunPort) {
-        return;
-      }
-
       try {
+        // Transaction ID verification is done inside _parseBindingResponse,
+        // so we don't filter by source address — some servers respond from
+        // a different IP/port (load-balancing, anycast, etc.).
         final result = _parseBindingResponse(datagram.data, txId);
         if (result != null && !completer.isCompleted) {
           timer?.cancel();
@@ -90,8 +121,15 @@ class StunService {
       }
     });
 
-    socket.send(request, addr, stunPort);
-    AppLogger.debug(_tag, 'Sent STUN request to $stunHost:$stunPort');
+    try {
+      socket.send(request, addr, stunPort);
+      AppLogger.debug(
+          _tag, 'Sent STUN request to $stunHost:$stunPort (${addr.address})');
+    } catch (e) {
+      timer?.cancel();
+      udpService.setStunResponseHandler(null);
+      throw Exception('Failed to send STUN request to $stunHost: $e');
+    }
 
     return completer.future;
   }
@@ -117,6 +155,126 @@ class StunService {
       }
     }
     throw Exception('所有 STUN 服务器获取失败');
+  }
+
+  /// Query multiple STUN servers from the same socket and compare the mapped
+  /// ports.  Same port → cone NAT; different ports → symmetric NAT.
+  /// Collects up to [_maxStunSamples] samples to analyse port-allocation
+  /// patterns (delta consistency) for smarter prediction.
+  static const int _maxStunSamples = 4;
+
+  static Future<NatDetectionResult> detectNatType(
+    UdpService udpService, {
+    String? preferredServer,
+  }) async {
+    final servers = _buildServerList(preferredServer);
+
+    final samples = <StunResult>[];
+    final usedDestinations = <String>{};
+
+    for (final server in servers) {
+      if (samples.length >= _maxStunSamples) break;
+
+      try {
+        final addrs = await InternetAddress.lookup(server.host)
+            .timeout(const Duration(seconds: 3));
+        final resolved = addrs
+            .where((a) => a.type == InternetAddressType.IPv4)
+            .firstOrNull
+            ?.address;
+
+        final destKey = '$resolved:${server.port}';
+        if (usedDestinations.contains(destKey)) continue;
+
+        final result =
+            await getPublicAddr(udpService, server.host, server.port);
+        samples.add(result);
+        if (resolved != null) usedDestinations.add(destKey);
+
+        AppLogger.info(_tag,
+            'NAT detect sample ${samples.length}: $result via ${server.address}');
+      } catch (e) {
+        AppLogger.warning(
+            _tag, 'NAT detect sample failed for ${server.address}: $e');
+        continue;
+      }
+    }
+
+    if (samples.isEmpty) {
+      throw Exception('所有 STUN 服务器获取失败');
+    }
+
+    final ports = samples.map((s) => s.publicPort).toList();
+
+    if (samples.length < 2) {
+      AppLogger.warning(
+          _tag, 'Only one STUN server reachable, NAT type unknown');
+      return NatDetectionResult(
+        natType: NatType.unknown,
+        primaryResult: samples.first,
+        portSamples: ports,
+      );
+    }
+
+    // All mapped ports identical → cone NAT.
+    if (ports.toSet().length == 1) {
+      AppLogger.info(_tag,
+          'NAT type: Cone (all ${samples.length} ports identical: ${ports.first})');
+      return NatDetectionResult(
+        natType: NatType.cone,
+        primaryResult: samples.first,
+        secondaryResult: samples[1],
+        portSamples: ports,
+      );
+    }
+
+    // Different ports → symmetric NAT.  Compute deltas & analyse pattern.
+    final deltas = <int>[];
+    for (int i = 1; i < ports.length; i++) {
+      deltas.add(ports[i] - ports[i - 1]);
+    }
+
+    final isConsistent = _areDeltasConsistent(deltas);
+
+    // Use the median delta as the representative value – more robust than mean
+    // when one sample is an outlier.
+    final sortedAbsDeltas = deltas.map((d) => d.abs()).toList()..sort();
+    final medianAbs = sortedAbsDeltas[sortedAbsDeltas.length ~/ 2];
+    final sign =
+        deltas.where((d) => d > 0).length >= deltas.where((d) => d < 0).length
+            ? 1
+            : -1;
+    final representativeDelta = sign * medianAbs;
+
+    AppLogger.info(_tag,
+        'NAT type: Symmetric (ports: ${ports.join(" → ")}, '
+        'deltas: ${deltas.join(", ")}, '
+        'consistent: $isConsistent, representative delta: $representativeDelta)');
+
+    return NatDetectionResult(
+      natType: NatType.symmetric,
+      primaryResult: samples.last,
+      secondaryResult: samples.length > 1 ? samples[samples.length - 2] : null,
+      portDelta: representativeDelta,
+      portSamples: ports,
+      portDeltas: deltas,
+      isConsistentDelta: isConsistent,
+    );
+  }
+
+  /// Deltas are "consistent" when they all share the same sign and their
+  /// absolute values are within a small tolerance of each other.
+  static bool _areDeltasConsistent(List<int> deltas) {
+    if (deltas.length < 2) return deltas.isNotEmpty;
+
+    final allPositive = deltas.every((d) => d > 0);
+    final allNegative = deltas.every((d) => d < 0);
+    if (!allPositive && !allNegative) return false;
+
+    final absValues = deltas.map((d) => d.abs()).toList();
+    final maxVal = absValues.reduce(max);
+    final minVal = absValues.reduce(min);
+    return (maxVal - minVal) <= 2;
   }
 
   static List<StunServerOption> _buildServerList(String? preferredServer) {

@@ -183,20 +183,43 @@ class MonitorService implements UdpEventListener {
     updatePeerStatus?.call(peerId, ConnectionStatus.reconnecting);
     udpService.markDisconnected(peer.effectiveIp, peer.effectivePort);
 
-    _startReconnect(peerId, peer.effectiveCandidates);
+    _startReconnect(peerId, peer.effectiveCandidates,
+        enablePortPrediction: peer.usePeerPortPrediction,
+        portDelta: peer.peerPortDelta,
+        isConsistentDelta: peer.peerIsConsistentDelta);
   }
 
   /// Public entry point for reconnect (used for initial connection failures too).
-  void scheduleReconnect(String peerId, List<PeerCandidate> candidates) {
-    _startReconnect(peerId, candidates);
+  void scheduleReconnect(
+    String peerId,
+    List<PeerCandidate> candidates, {
+    bool enablePortPrediction = false,
+    int? portDelta,
+    bool isConsistentDelta = false,
+  }) {
+    _startReconnect(peerId, candidates,
+        enablePortPrediction: enablePortPrediction,
+        portDelta: portDelta,
+        isConsistentDelta: isConsistentDelta);
   }
 
-  void _startReconnect(String peerId, List<PeerCandidate> candidates) {
+  void _startReconnect(
+    String peerId,
+    List<PeerCandidate> candidates, {
+    bool enablePortPrediction = false,
+    int? portDelta,
+    bool isConsistentDelta = false,
+  }) {
     _cancelReconnect(peerId);
 
     final controller = ReconnectController(
       onReconnect: () async {
-        final result = await udpService.holePunchMultiCandidate(candidates);
+        final result = await udpService.holePunchMultiCandidate(
+          candidates,
+          enablePortPrediction: enablePortPrediction,
+          portDelta: portDelta,
+          isConsistentDelta: isConsistentDelta,
+        );
         if (result != null) {
           updateActiveAddress?.call(peerId, result.ip, result.port);
           return true;

@@ -33,6 +33,9 @@ class SelfInfoProvider extends ChangeNotifier {
   String get candidateString => _selfInfo.candidateString;
   String? get errorMessage => _selfInfo.errorMessage;
   String? get ipLocation => _selfInfo.ipLocation;
+  NatType get natType => _selfInfo.natType;
+  int? get portDelta => _selfInfo.portDelta;
+  bool get isConsistentDelta => _selfInfo.isConsistentDelta;
 
   Future<void> initialize() async {
     _selfInfo = _selfInfo.copyWith(stunStatus: StunStatus.loading);
@@ -84,18 +87,23 @@ class SelfInfoProvider extends ChangeNotifier {
     }
 
     try {
-      final result = await StunService.fetchPublicAddress(
+      final detection = await StunService.detectNatType(
         _udpService,
         preferredServer: stunServer,
       );
+      final result = detection.primaryResult;
       _selfInfo = _selfInfo.copyWith(
         publicIp: result.publicIp,
         publicPort: result.publicPort,
         stunStatus: StunStatus.success,
+        natType: detection.natType,
+        portDelta: detection.portDelta,
+        isConsistentDelta: detection.isConsistentDelta,
         clearError: true,
         clearIpLocation: true,
       );
-      AppLogger.info(_tag, 'Public address: ${_selfInfo.publicAddress}');
+      AppLogger.info(_tag,
+          'Public address: ${_selfInfo.publicAddress}, NAT: ${detection.natType.label}');
       notifyListeners();
 
       _queryIpLocation(result.publicIp);

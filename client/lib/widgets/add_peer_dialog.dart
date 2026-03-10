@@ -1,17 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'package:p2p_test/models/peer_candidate.dart';
 import 'package:p2p_test/utils/validators.dart';
 
 class AddPeerResult {
-  final List<PeerCandidate> candidates;
+  final ParsedCandidateInput parsed;
 
-  AddPeerResult(this.candidates);
+  AddPeerResult(this.parsed);
 }
 
 class AddPeerDialog extends StatefulWidget {
-  final bool Function(List<PeerCandidate> candidates) peerExists;
+  final bool Function(ParsedCandidateInput input) peerExists;
   final String? initialValue;
 
   const AddPeerDialog({
@@ -45,8 +44,8 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
       final clipData = await Clipboard.getData(Clipboard.kTextPlain);
       if (clipData?.text == null) return;
       final text = clipData!.text!.trim();
-      final candidates = Validators.parseCandidates(text);
-      if (mounted && candidates != null) {
+      final parsed = Validators.parseCandidateInput(text);
+      if (mounted && parsed != null) {
         setState(() {
           _clipboardValid = true;
           _clipboardValue = text;
@@ -110,8 +109,8 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
               controller: _controller,
               decoration: const InputDecoration(
                 labelText: '对方地址',
-                hintText: '例: 192.168.1.1:12345,1.2.3.4:50001',
-                helperText: '支持多个候选地址，用逗号分隔',
+                hintText: '例: 1.2.3.4:50001|sym,d=2,c=1',
+                helperText: '粘贴对方的候选地址，NAT 元数据可省略',
                 helperMaxLines: 2,
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.computer),
@@ -155,15 +154,15 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
   void _onAdd() {
     if (!_formKey.currentState!.validate()) return;
 
-    final candidates = Validators.parseCandidates(_controller.text)!;
+    final parsed = Validators.parseCandidateInput(_controller.text)!;
 
-    if (widget.peerExists(candidates)) {
+    if (widget.peerExists(parsed)) {
       setState(() {
         _duplicateError = '该用户已在监听列表中';
       });
       return;
     }
 
-    Navigator.of(context).pop(AddPeerResult(candidates));
+    Navigator.of(context).pop(AddPeerResult(parsed));
   }
 }

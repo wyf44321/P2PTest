@@ -251,7 +251,7 @@ class _MainContent extends StatelessWidget {
     );
 
     if (result != null) {
-      peerProvider.addPeer(result.candidates);
+      peerProvider.addPeer(result.parsed);
     }
   }
 
