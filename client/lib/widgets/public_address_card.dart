@@ -16,7 +16,6 @@ class PublicAddressCard extends StatelessWidget {
     return Consumer<SelfInfoProvider>(
       builder: (context, provider, _) {
         final publicAddr = provider.publicAddress;
-        final localAddr = provider.localAddress;
         final candidateStr = provider.candidateString;
         final ipLocation = provider.ipLocation;
 
@@ -82,14 +81,6 @@ class PublicAddressCard extends StatelessWidget {
                     ],
                   ),
                 ],
-                const SizedBox(height: 8),
-                _buildAddressRow(
-                  context,
-                  label: '内网',
-                  address: localAddr,
-                  theme: theme,
-                  isPrimary: false,
-                ),
                 if (candidateStr.isNotEmpty) ...[
                   const SizedBox(height: 10),
                   const Divider(height: 1),

@@ -260,7 +260,7 @@ class _MainContent extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('确认清除'),
-        content: const Text('确定清除所有已断开的监听用户？'),
+        content: const Text('确定清除所有已断开和连接失败的监听用户？'),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         actions: [
           TextButton(

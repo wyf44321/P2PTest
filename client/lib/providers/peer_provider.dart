@@ -36,7 +36,8 @@ class PeerProvider extends ChangeNotifier {
   bool get hasDisconnectedPeers => _peers.any(
         (p) =>
             p.status == ConnectionStatus.disconnected ||
-            p.status == ConnectionStatus.degradedMonitoring,
+            p.status == ConnectionStatus.degradedMonitoring ||
+            p.status == ConnectionStatus.failed,
       );
 
   List<MonitoredPeer> get connectedPeers =>
@@ -117,7 +118,8 @@ class PeerProvider extends ChangeNotifier {
     final toRemove = _peers
         .where((p) =>
             p.status == ConnectionStatus.disconnected ||
-            p.status == ConnectionStatus.degradedMonitoring)
+            p.status == ConnectionStatus.degradedMonitoring ||
+            p.status == ConnectionStatus.failed)
         .map((p) => p.id)
         .toList();
 
@@ -135,7 +137,8 @@ class PeerProvider extends ChangeNotifier {
     _peers = _peers
         .where((p) =>
             p.status != ConnectionStatus.disconnected &&
-            p.status != ConnectionStatus.degradedMonitoring)
+            p.status != ConnectionStatus.degradedMonitoring &&
+            p.status != ConnectionStatus.failed)
         .toList();
     notifyListeners();
     await _savePeers();
@@ -226,11 +229,16 @@ class PeerProvider extends ChangeNotifier {
         updatePeerStatus(peer.id, ConnectionStatus.connected);
         _monitorService.startMonitoring(peer.id);
       } else {
-        updatePeerStatus(peer.id, ConnectionStatus.failed);
+        AppLogger.warning(
+            _tag, 'Initial punch timeout for ${peer.address}, scheduling reconnect');
+        updatePeerStatus(peer.id, ConnectionStatus.reconnecting);
+        _monitorService.scheduleReconnect(peer.id, candidates);
       }
     } catch (e) {
       AppLogger.error(_tag, 'Connection failed for ${peer.address}', e);
-      updatePeerStatus(peer.id, ConnectionStatus.failed);
+      updatePeerStatus(peer.id, ConnectionStatus.reconnecting);
+      _monitorService.scheduleReconnect(
+          peer.id, peer.effectiveCandidates);
     }
   }
 }

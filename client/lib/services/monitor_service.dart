@@ -186,6 +186,11 @@ class MonitorService implements UdpEventListener {
     _startReconnect(peerId, peer.effectiveCandidates);
   }
 
+  /// Public entry point for reconnect (used for initial connection failures too).
+  void scheduleReconnect(String peerId, List<PeerCandidate> candidates) {
+    _startReconnect(peerId, candidates);
+  }
+
   void _startReconnect(String peerId, List<PeerCandidate> candidates) {
     _cancelReconnect(peerId);
 

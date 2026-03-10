@@ -12,6 +12,14 @@ abstract class UdpEventListener {
       String remoteAddr, String msgType, Map<String, dynamic> data);
 }
 
+class _PunchOperation {
+  final Completer<bool> completer = Completer<bool>();
+  final Set<String> targets;
+  String? successAddr;
+
+  _PunchOperation(this.targets);
+}
+
 class UdpService {
   static const String _tag = 'UdpService';
 
@@ -20,9 +28,7 @@ class UdpService {
   void Function(Datagram datagram)? _stunResponseHandler;
 
   final Set<String> _connectedPeers = {};
-  Completer<bool>? _activePunchCompleter;
-  Set<String>? _activePunchTargets;
-  String? _activePunchSuccessAddr;
+  final List<_PunchOperation> _activePunchOps = [];
 
   RawDatagramSocket? get socket => _socket;
   bool get isBound => _socket != null;
@@ -90,26 +96,21 @@ class UdpService {
     sendMessage(ip, port, 'punch_ack', {
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     });
-
-    if (_activePunchTargets != null &&
-        _activePunchTargets!.contains(addr) &&
-        _activePunchCompleter != null &&
-        !_activePunchCompleter!.isCompleted) {
-      _activePunchSuccessAddr = addr;
-      _activePunchCompleter!.complete(true);
-    }
+    _completePunchOps(addr);
   }
 
   void _handlePunchAck(String addr) {
     AppLogger.debug(_tag, 'Received punch_ack from $addr');
     _connectedPeers.add(addr);
+    _completePunchOps(addr);
+  }
 
-    if (_activePunchTargets != null &&
-        _activePunchTargets!.contains(addr) &&
-        _activePunchCompleter != null &&
-        !_activePunchCompleter!.isCompleted) {
-      _activePunchSuccessAddr = addr;
-      _activePunchCompleter!.complete(true);
+  void _completePunchOps(String addr) {
+    for (final op in _activePunchOps) {
+      if (op.targets.contains(addr) && !op.completer.isCompleted) {
+        op.successAddr = addr;
+        op.completer.complete(true);
+      }
     }
   }
 
@@ -130,6 +131,7 @@ class UdpService {
 
   /// Attempt hole punch to multiple candidate addresses simultaneously.
   /// Returns the [PeerCandidate] that successfully connected, or null on timeout.
+  /// Supports multiple concurrent operations without interference.
   Future<PeerCandidate?> holePunchMultiCandidate(
     List<PeerCandidate> candidates, {
     int? timeoutSec,
@@ -146,42 +148,44 @@ class UdpService {
       }
     }
 
-    _activePunchCompleter = Completer<bool>();
-    _activePunchTargets = targetAddrs;
-    _activePunchSuccessAddr = null;
+    final op = _PunchOperation(targetAddrs);
+    _activePunchOps.add(op);
 
-    final deadline = DateTime.now().add(Duration(seconds: timeout));
-
-    Timer.periodic(AppConstants.holePunchInterval, (timer) {
-      if (_activePunchCompleter == null || _activePunchCompleter!.isCompleted) {
-        timer.cancel();
-        return;
-      }
-      if (DateTime.now().isAfter(deadline)) {
-        timer.cancel();
-        if (!_activePunchCompleter!.isCompleted) {
-          _activePunchCompleter!.complete(false);
-        }
-        return;
-      }
+    void sendPunchToAll() {
       for (final candidate in candidates) {
         sendMessage(candidate.ip, candidate.port, 'punch', {
           'timestamp': DateTime.now().millisecondsSinceEpoch,
         });
       }
+    }
+
+    sendPunchToAll();
+
+    final deadline = DateTime.now().add(Duration(seconds: timeout));
+
+    Timer.periodic(AppConstants.holePunchInterval, (timer) {
+      if (op.completer.isCompleted) {
+        timer.cancel();
+        return;
+      }
+      if (DateTime.now().isAfter(deadline)) {
+        timer.cancel();
+        if (!op.completer.isCompleted) {
+          op.completer.complete(false);
+        }
+        return;
+      }
+      sendPunchToAll();
     });
 
     AppLogger.info(_tag,
         'Starting hole punch to ${candidates.map((c) => c.address).join(", ")}');
 
-    final result = await _activePunchCompleter!.future;
-    final successAddr = _activePunchSuccessAddr;
-    _activePunchCompleter = null;
-    _activePunchTargets = null;
-    _activePunchSuccessAddr = null;
+    final result = await op.completer.future;
+    _activePunchOps.remove(op);
 
-    if (result && successAddr != null) {
-      final parts = successAddr.split(':');
+    if (result && op.successAddr != null) {
+      final parts = op.successAddr!.split(':');
       final active = PeerCandidate(parts[0], int.parse(parts[1]));
       AppLogger.info(_tag, 'Hole punch succeeded via ${active.address}');
       return active;
@@ -217,6 +221,12 @@ class UdpService {
     _socket?.close();
     _socket = null;
     _connectedPeers.clear();
+    for (final op in _activePunchOps) {
+      if (!op.completer.isCompleted) {
+        op.completer.complete(false);
+      }
+    }
+    _activePunchOps.clear();
     AppLogger.info(_tag, 'UDP socket closed');
   }
 }
