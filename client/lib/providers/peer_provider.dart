@@ -1,11 +1,13 @@
 import 'package:flutter/foundation.dart';
 
 import 'package:p2p_test/models/monitored_peer.dart';
+import 'package:p2p_test/models/peer_candidate.dart';
 import 'package:p2p_test/services/ip_geo_service.dart';
 import 'package:p2p_test/services/monitor_service.dart';
 import 'package:p2p_test/services/storage_service.dart';
 import 'package:p2p_test/services/udp_service.dart';
 import 'package:p2p_test/utils/logger.dart';
+import 'package:p2p_test/utils/validators.dart';
 
 class PeerProvider extends ChangeNotifier {
   static const String _tag = 'PeerProvider';
@@ -54,6 +56,7 @@ class PeerProvider extends ChangeNotifier {
     _monitorService.updateRtt = updateRTT;
     _monitorService.updatePacketLoss = updatePacketLoss;
     _monitorService.updateReconnectProgress = updateReconnectProgress;
+    _monitorService.updateActiveAddress = updateActiveAddress;
   }
 
   Future<void> loadSavedPeers() async {
@@ -67,12 +70,23 @@ class PeerProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> addPeer(String ip, int port) async {
-    final id = '${ip}_${port}_${DateTime.now().millisecondsSinceEpoch}';
+  /// Add a peer with a list of candidate addresses.
+  Future<void> addPeer(List<PeerCandidate> candidates) async {
+    if (candidates.isEmpty) return;
+
+    // Use the first public IP as primary, or fall back to first candidate.
+    final primary = candidates.firstWhere(
+      (c) => !Validators.isPrivateIp(c.ip),
+      orElse: () => candidates.first,
+    );
+
+    final id =
+        '${primary.ip}_${primary.port}_${DateTime.now().millisecondsSinceEpoch}';
     final peer = MonitoredPeer(
       id: id,
-      ip: ip,
-      port: port,
+      ip: primary.ip,
+      port: primary.port,
+      candidates: candidates,
       createdAt: DateTime.now(),
       status: ConnectionStatus.connecting,
     );
@@ -81,7 +95,7 @@ class PeerProvider extends ChangeNotifier {
     notifyListeners();
     await _savePeers();
 
-    _queryIpLocation(id, ip);
+    _queryIpLocation(id, primary.ip);
     _connectPeer(peer);
   }
 
@@ -90,7 +104,7 @@ class PeerProvider extends ChangeNotifier {
     if (peer == null) return;
 
     _monitorService.stopMonitoring(peerId);
-    _udpService.markDisconnected(peer.ip, peer.port);
+    _udpService.markDisconnected(peer.effectiveIp, peer.effectivePort);
 
     _peers = _peers.where((p) => p.id != peerId).toList();
     notifyListeners();
@@ -114,7 +128,7 @@ class PeerProvider extends ChangeNotifier {
     for (final peerId in toRemove) {
       final peer = _findPeer(peerId);
       if (peer != null) {
-        _udpService.markDisconnected(peer.ip, peer.port);
+        _udpService.markDisconnected(peer.effectiveIp, peer.effectivePort);
       }
     }
 
@@ -163,8 +177,16 @@ class PeerProvider extends ChangeNotifier {
     _updatePeer(peerId, (p) => p.copyWith(ipLocation: location));
   }
 
-  bool peerExists(String ip, int port) {
-    return _peers.any((p) => p.ip == ip && p.port == port);
+  void updateActiveAddress(String peerId, String ip, int port) {
+    _updatePeer(peerId, (p) => p.copyWith(activeIp: ip, activePort: port));
+  }
+
+  bool peerExists(List<PeerCandidate> candidates) {
+    final newAddrs = candidates.map((c) => c.address).toSet();
+    return _peers.any((p) {
+      final existingAddrs = p.effectiveCandidates.map((c) => c.address).toSet();
+      return existingAddrs.intersection(newAddrs).isNotEmpty;
+    });
   }
 
   // --- Private helpers ---
@@ -197,8 +219,10 @@ class PeerProvider extends ChangeNotifier {
 
   Future<void> _connectPeer(MonitoredPeer peer) async {
     try {
-      final success = await _udpService.holePunch(peer.ip, peer.port);
-      if (success) {
+      final candidates = peer.effectiveCandidates;
+      final result = await _udpService.holePunchMultiCandidate(candidates);
+      if (result != null) {
+        updateActiveAddress(peer.id, result.ip, result.port);
         updatePeerStatus(peer.id, ConnectionStatus.connected);
         _monitorService.startMonitoring(peer.id);
       } else {

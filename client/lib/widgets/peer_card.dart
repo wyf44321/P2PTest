@@ -30,6 +30,17 @@ class PeerCard extends StatelessWidget {
                 fontFamily: 'monospace',
               ),
             ),
+            if (peer.activeAddress != peer.address &&
+                peer.status == ConnectionStatus.connected) ...[
+              const SizedBox(height: 2),
+              Text(
+                '实际连接: ${peer.activeAddress}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                  color: theme.colorScheme.tertiary,
+                ),
+              ),
+            ],
             const SizedBox(height: 4),
             // IP Location
             Text(

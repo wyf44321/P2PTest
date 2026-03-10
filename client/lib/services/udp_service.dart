@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:p2p_test/config/constants.dart';
+import 'package:p2p_test/models/peer_candidate.dart';
 import 'package:p2p_test/utils/logger.dart';
 
 abstract class UdpEventListener {
@@ -20,7 +21,8 @@ class UdpService {
 
   final Set<String> _connectedPeers = {};
   Completer<bool>? _activePunchCompleter;
-  String? _activePunchTarget;
+  Set<String>? _activePunchTargets;
+  String? _activePunchSuccessAddr;
 
   RawDatagramSocket? get socket => _socket;
   bool get isBound => _socket != null;
@@ -89,9 +91,11 @@ class UdpService {
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     });
 
-    if (_activePunchTarget == addr &&
+    if (_activePunchTargets != null &&
+        _activePunchTargets!.contains(addr) &&
         _activePunchCompleter != null &&
         !_activePunchCompleter!.isCompleted) {
+      _activePunchSuccessAddr = addr;
       _activePunchCompleter!.complete(true);
     }
   }
@@ -100,9 +104,11 @@ class UdpService {
     AppLogger.debug(_tag, 'Received punch_ack from $addr');
     _connectedPeers.add(addr);
 
-    if (_activePunchTarget == addr &&
+    if (_activePunchTargets != null &&
+        _activePunchTargets!.contains(addr) &&
         _activePunchCompleter != null &&
         !_activePunchCompleter!.isCompleted) {
+      _activePunchSuccessAddr = addr;
       _activePunchCompleter!.complete(true);
     }
   }
@@ -122,16 +128,27 @@ class UdpService {
     }
   }
 
-  Future<bool> holePunch(String remoteIp, int remotePort,
-      {int? timeoutSec}) async {
+  /// Attempt hole punch to multiple candidate addresses simultaneously.
+  /// Returns the [PeerCandidate] that successfully connected, or null on timeout.
+  Future<PeerCandidate?> holePunchMultiCandidate(
+    List<PeerCandidate> candidates, {
+    int? timeoutSec,
+  }) async {
     final timeout =
         timeoutSec ?? AppConstants.holePunchTimeout.inSeconds;
-    final targetAddr = '$remoteIp:$remotePort';
 
-    if (_connectedPeers.contains(targetAddr)) return true;
+    final targetAddrs = candidates.map((c) => c.address).toSet();
+
+    for (final addr in targetAddrs) {
+      if (_connectedPeers.contains(addr)) {
+        final parts = addr.split(':');
+        return PeerCandidate(parts[0], int.parse(parts[1]));
+      }
+    }
 
     _activePunchCompleter = Completer<bool>();
-    _activePunchTarget = targetAddr;
+    _activePunchTargets = targetAddrs;
+    _activePunchSuccessAddr = null;
 
     final deadline = DateTime.now().add(Duration(seconds: timeout));
 
@@ -147,24 +164,41 @@ class UdpService {
         }
         return;
       }
-      sendMessage(remoteIp, remotePort, 'punch', {
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-      });
+      for (final candidate in candidates) {
+        sendMessage(candidate.ip, candidate.port, 'punch', {
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        });
+      }
     });
 
-    AppLogger.info(_tag, 'Starting hole punch to $targetAddr');
+    AppLogger.info(_tag,
+        'Starting hole punch to ${candidates.map((c) => c.address).join(", ")}');
 
     final result = await _activePunchCompleter!.future;
+    final successAddr = _activePunchSuccessAddr;
     _activePunchCompleter = null;
-    _activePunchTarget = null;
+    _activePunchTargets = null;
+    _activePunchSuccessAddr = null;
 
-    if (result) {
-      AppLogger.info(_tag, 'Hole punch succeeded to $targetAddr');
-    } else {
-      AppLogger.warning(_tag, 'Hole punch timeout to $targetAddr');
+    if (result && successAddr != null) {
+      final parts = successAddr.split(':');
+      final active = PeerCandidate(parts[0], int.parse(parts[1]));
+      AppLogger.info(_tag, 'Hole punch succeeded via ${active.address}');
+      return active;
     }
 
-    return result;
+    AppLogger.warning(_tag, 'Hole punch timeout');
+    return null;
+  }
+
+  /// Convenience wrapper: single-address hole punch (backward compatible).
+  Future<bool> holePunch(String remoteIp, int remotePort,
+      {int? timeoutSec}) async {
+    final result = await holePunchMultiCandidate(
+      [PeerCandidate(remoteIp, remotePort)],
+      timeoutSec: timeoutSec,
+    );
+    return result != null;
   }
 
   bool isConnected(String ip, int port) {

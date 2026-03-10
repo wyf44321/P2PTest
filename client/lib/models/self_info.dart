@@ -40,6 +40,7 @@ class SelfInfo {
   final int? publicPort;
   final String? localIp;
   final int? localPort;
+  final List<String> localIps;
   final StunStatus stunStatus;
   final String? errorMessage;
   final StunConfig? stunConfig;
@@ -50,6 +51,7 @@ class SelfInfo {
     this.publicPort,
     this.localIp,
     this.localPort,
+    this.localIps = const [],
     this.stunStatus = StunStatus.loading,
     this.errorMessage,
     this.stunConfig,
@@ -62,11 +64,26 @@ class SelfInfo {
   String get localAddress =>
       (localIp != null && localPort != null) ? '$localIp:$localPort' : '';
 
+  /// All candidate addresses: host candidates (local IPs) + server reflexive (public IP).
+  /// Format: "localIp1:localPort,localIp2:localPort,...,publicIp:publicPort"
+  String get candidateString {
+    if (localPort == null) return publicAddress;
+    final parts = <String>[];
+    for (final lip in localIps) {
+      parts.add('$lip:$localPort');
+    }
+    if (publicIp != null && publicPort != null) {
+      parts.add('$publicIp:$publicPort');
+    }
+    return parts.join(',');
+  }
+
   SelfInfo copyWith({
     String? publicIp,
     int? publicPort,
     String? localIp,
     int? localPort,
+    List<String>? localIps,
     StunStatus? stunStatus,
     String? errorMessage,
     StunConfig? stunConfig,
@@ -79,6 +96,7 @@ class SelfInfo {
       publicPort: publicPort ?? this.publicPort,
       localIp: localIp ?? this.localIp,
       localPort: localPort ?? this.localPort,
+      localIps: localIps ?? this.localIps,
       stunStatus: stunStatus ?? this.stunStatus,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       stunConfig: stunConfig ?? this.stunConfig,

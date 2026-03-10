@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import 'package:p2p_test/config/constants.dart';
 import 'package:p2p_test/models/monitored_peer.dart';
+import 'package:p2p_test/models/peer_candidate.dart';
 import 'package:p2p_test/services/udp_service.dart';
 import 'package:p2p_test/utils/logger.dart';
 import 'package:p2p_test/utils/reconnect.dart';
@@ -64,6 +65,8 @@ typedef RttUpdater = void Function(String peerId, int rtt);
 typedef PacketLossUpdater = void Function(String peerId, double packetLoss);
 typedef ReconnectProgressUpdater = void Function(
     String peerId, int attempt, int maxAttempts);
+typedef ActiveAddressUpdater = void Function(
+    String peerId, String ip, int port);
 
 class MonitorService implements UdpEventListener {
   static const String _tag = 'MonitorService';
@@ -77,6 +80,7 @@ class MonitorService implements UdpEventListener {
   RttUpdater? updateRtt;
   PacketLossUpdater? updatePacketLoss;
   ReconnectProgressUpdater? updateReconnectProgress;
+  ActiveAddressUpdater? updateActiveAddress;
 
   final Map<String, PingStats> _peerStats = {};
   Timer? _probeTimer;
@@ -86,7 +90,6 @@ class MonitorService implements UdpEventListener {
   int _currentIndex = 0;
   int _nextSeq = 0;
 
-  /// Track consecutive missed pongs per peer for disconnect detection
   final Map<String, int> _missedPongs = {};
   static const int _disconnectThreshold = 3;
 
@@ -137,21 +140,18 @@ class MonitorService implements UdpEventListener {
     final seq = _nextSeq++;
     final timestamp = DateTime.now().millisecondsSinceEpoch;
 
-    udpService.sendMessage(peer.ip, peer.port, 'ping', {
+    udpService.sendMessage(peer.effectiveIp, peer.effectivePort, 'ping', {
       'seq': seq,
       'timestamp': timestamp,
     });
 
     _peerStats[peer.id]?.recordPingSent(seq, timestamp);
 
-    // Check for missed pongs after timeout
-    Timer(Duration(milliseconds: AppConstants.pongTimeoutMs + 500), () {
+    Timer(const Duration(milliseconds: AppConstants.pongTimeoutMs + 500), () {
       final stats = _peerStats[peer.id];
       if (stats == null) return;
-      bool found = false;
       for (final record in stats._pingHistory) {
         if (record.seq == seq) {
-          found = true;
           if (!record.received) {
             _onPingTimeout(peer.id);
           }
@@ -181,16 +181,23 @@ class MonitorService implements UdpEventListener {
 
     AppLogger.warning(_tag, 'Peer $peerId disconnected, starting reconnect');
     updatePeerStatus?.call(peerId, ConnectionStatus.reconnecting);
-    udpService.markDisconnected(peer.ip, peer.port);
+    udpService.markDisconnected(peer.effectiveIp, peer.effectivePort);
 
-    _startReconnect(peerId, peer.ip, peer.port);
+    _startReconnect(peerId, peer.effectiveCandidates);
   }
 
-  void _startReconnect(String peerId, String ip, int port) {
+  void _startReconnect(String peerId, List<PeerCandidate> candidates) {
     _cancelReconnect(peerId);
 
     final controller = ReconnectController(
-      onReconnect: () => udpService.holePunch(ip, port),
+      onReconnect: () async {
+        final result = await udpService.holePunchMultiCandidate(candidates);
+        if (result != null) {
+          updateActiveAddress?.call(peerId, result.ip, result.port);
+          return true;
+        }
+        return false;
+      },
       onSuccess: () {
         AppLogger.info(_tag, 'Reconnect succeeded for $peerId');
         updatePeerStatus?.call(peerId, ConnectionStatus.connected);
@@ -287,11 +294,10 @@ class MonitorService implements UdpEventListener {
     final now = DateTime.now().millisecondsSinceEpoch;
     final rtt = now - pingTimestamp;
 
-    // Find the peer by address
     final allPeers = getAllPeers?.call() ?? [];
     MonitoredPeer? matchedPeer;
     for (final peer in allPeers) {
-      if (peer.address == remoteAddr) {
+      if (peer.activeAddress == remoteAddr) {
         matchedPeer = peer;
         break;
       }
@@ -302,7 +308,6 @@ class MonitorService implements UdpEventListener {
     _missedPongs[matchedPeer.id] = 0;
     updateRtt?.call(matchedPeer.id, rtt);
 
-    // If degraded, restore to connected
     if (matchedPeer.status == ConnectionStatus.degradedMonitoring) {
       AppLogger.info(
           _tag, 'Peer ${matchedPeer.id} recovered from degraded monitoring');

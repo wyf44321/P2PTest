@@ -30,6 +30,7 @@ class SelfInfoProvider extends ChangeNotifier {
   StunStatus get stunStatus => _selfInfo.stunStatus;
   String get publicAddress => _selfInfo.publicAddress;
   String get localAddress => _selfInfo.localAddress;
+  String get candidateString => _selfInfo.candidateString;
   String? get errorMessage => _selfInfo.errorMessage;
   String? get ipLocation => _selfInfo.ipLocation;
 
@@ -40,8 +41,13 @@ class SelfInfoProvider extends ChangeNotifier {
     try {
       // Bind UDP socket
       final localPort = await _udpService.bind();
-      final localIp = await _getLocalIp();
-      _selfInfo = _selfInfo.copyWith(localPort: localPort, localIp: localIp);
+      final localIps = await _getAllLocalIps();
+      final localIp = localIps.isNotEmpty ? localIps.first : null;
+      _selfInfo = _selfInfo.copyWith(
+        localPort: localPort,
+        localIp: localIp,
+        localIps: localIps,
+      );
 
       // Load saved STUN config
       final config = await _storageService.loadStunConfig();
@@ -143,7 +149,8 @@ class SelfInfoProvider extends ChangeNotifier {
     }
   }
 
-  static Future<String?> _getLocalIp() async {
+  static Future<List<String>> _getAllLocalIps() async {
+    final ips = <String>[];
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
@@ -152,13 +159,13 @@ class SelfInfoProvider extends ChangeNotifier {
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           if (!addr.isLoopback) {
-            return addr.address;
+            ips.add(addr.address);
           }
         }
       }
     } catch (e) {
-      AppLogger.warning(_tag, 'Failed to get local IP: $e');
+      AppLogger.warning(_tag, 'Failed to get local IPs: $e');
     }
-    return null;
+    return ips;
   }
 }

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'package:p2p_test/config/constants.dart';
@@ -7,7 +6,6 @@ import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/providers/peer_provider.dart';
 import 'package:p2p_test/providers/self_info_provider.dart';
 import 'package:p2p_test/screens/stun_config_screen.dart';
-import 'package:p2p_test/utils/validators.dart';
 import 'package:p2p_test/widgets/add_peer_dialog.dart';
 import 'package:p2p_test/widgets/peer_card.dart';
 import 'package:p2p_test/widgets/public_address_card.dart';
@@ -243,59 +241,17 @@ class _MainContent extends StatelessWidget {
   void _showAddPeerDialog(BuildContext context) async {
     final peerProvider = context.read<PeerProvider>();
 
-    String? initialIp;
-    int? initialPort;
-
-    try {
-      final clipData = await Clipboard.getData(Clipboard.kTextPlain);
-      final parsed = clipData?.text != null
-          ? Validators.parseIpPort(clipData!.text!)
-          : null;
-
-      if (parsed != null && context.mounted) {
-        final autoFill = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('检测到地址'),
-            content: Text(
-              '剪切板中包含地址 ${parsed.ip}:${parsed.port}，是否自动填入？',
-            ),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('否'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('是'),
-              ),
-            ],
-          ),
-        );
-
-        if (autoFill == true) {
-          initialIp = parsed.ip;
-          initialPort = parsed.port;
-        }
-      }
-    } catch (_) {}
-
     if (!context.mounted) return;
 
     final result = await showDialog<AddPeerResult>(
       context: context,
       builder: (ctx) => AddPeerDialog(
         peerExists: peerProvider.peerExists,
-        initialIp: initialIp,
-        initialPort: initialPort,
       ),
     );
 
     if (result != null) {
-      peerProvider.addPeer(result.ip, result.port);
+      peerProvider.addPeer(result.candidates);
     }
   }
 

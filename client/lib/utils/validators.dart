@@ -1,3 +1,5 @@
+import 'package:p2p_test/models/peer_candidate.dart';
+
 class Validators {
   Validators._();
 
@@ -68,5 +70,35 @@ class Validators {
     if (a == 192 && b == 168) return true;
     if (a == 127) return true;
     return false;
+  }
+
+  /// Parse a candidate string like "192.168.1.100:12345,1.2.3.4:50001"
+  /// into a list of PeerCandidate. Returns null if the string is invalid.
+  static List<PeerCandidate>? parseCandidates(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+
+    final segments = trimmed.split(',');
+    final candidates = <PeerCandidate>[];
+
+    for (final seg in segments) {
+      final parsed = parseIpPort(seg.trim());
+      if (parsed == null) return null;
+      candidates.add(PeerCandidate(parsed.ip, parsed.port));
+    }
+
+    return candidates.isEmpty ? null : candidates;
+  }
+
+  /// Validate a candidate string for form fields.
+  static String? validateCandidateString(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return '请输入对方地址';
+    }
+    final candidates = parseCandidates(value);
+    if (candidates == null) {
+      return '地址格式错误，示例: 192.168.1.1:12345 或 192.168.1.1:12345,1.2.3.4:50001';
+    }
+    return null;
   }
 }

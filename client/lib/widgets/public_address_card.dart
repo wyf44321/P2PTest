@@ -17,6 +17,7 @@ class PublicAddressCard extends StatelessWidget {
       builder: (context, provider, _) {
         final publicAddr = provider.publicAddress;
         final localAddr = provider.localAddress;
+        final candidateStr = provider.candidateString;
         final ipLocation = provider.ipLocation;
 
         return Card(
@@ -89,6 +90,55 @@ class PublicAddressCard extends StatelessWidget {
                   theme: theme,
                   isPrimary: false,
                 ),
+                if (candidateStr.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  const Divider(height: 1),
+                  const SizedBox(height: 10),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: 36,
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Icon(
+                            Icons.share_location,
+                            size: 16,
+                            color: theme.colorScheme.primary,
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '候选地址（发给对方）',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.primary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              candidateStr,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                fontFamily: 'monospace',
+                                color: theme.colorScheme.onSurface,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 18),
+                        onPressed: () => _copyAddress(context, candidateStr),
+                        tooltip: '复制候选地址',
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),
@@ -134,7 +184,7 @@ class PublicAddressCard extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.copy, size: 18),
             onPressed: () => _copyAddress(context, address),
-            tooltip: '复制$label地址',
+            tooltip: '复制${isPrimary ? "公网" : "内网"}地址',
             visualDensity: VisualDensity.compact,
           ),
       ],

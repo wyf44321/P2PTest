@@ -1,25 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:p2p_test/models/peer_candidate.dart';
 import 'package:p2p_test/utils/validators.dart';
 
 class AddPeerResult {
-  final String ip;
-  final int port;
+  final List<PeerCandidate> candidates;
 
-  AddPeerResult(this.ip, this.port);
+  AddPeerResult(this.candidates);
 }
 
 class AddPeerDialog extends StatefulWidget {
-  final bool Function(String ip, int port) peerExists;
-  final String? initialIp;
-  final int? initialPort;
+  final bool Function(List<PeerCandidate> candidates) peerExists;
+  final String? initialValue;
 
   const AddPeerDialog({
     super.key,
     required this.peerExists,
-    this.initialIp,
-    this.initialPort,
+    this.initialValue,
   });
 
   @override
@@ -28,21 +26,16 @@ class AddPeerDialog extends StatefulWidget {
 
 class _AddPeerDialogState extends State<AddPeerDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _ipController = TextEditingController();
-  final _portController = TextEditingController();
+  final _controller = TextEditingController();
   String? _duplicateError;
   bool _clipboardValid = false;
-  String? _clipboardIp;
-  int? _clipboardPort;
+  String? _clipboardValue;
 
   @override
   void initState() {
     super.initState();
-    if (widget.initialIp != null) {
-      _ipController.text = widget.initialIp!;
-    }
-    if (widget.initialPort != null) {
-      _portController.text = widget.initialPort.toString();
+    if (widget.initialValue != null) {
+      _controller.text = widget.initialValue!;
     }
     _checkClipboard();
   }
@@ -50,14 +43,13 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
   Future<void> _checkClipboard() async {
     try {
       final clipData = await Clipboard.getData(Clipboard.kTextPlain);
-      final parsed = clipData?.text != null
-          ? Validators.parseIpPort(clipData!.text!)
-          : null;
-      if (mounted) {
+      if (clipData?.text == null) return;
+      final text = clipData!.text!.trim();
+      final candidates = Validators.parseCandidates(text);
+      if (mounted && candidates != null) {
         setState(() {
-          _clipboardValid = parsed != null;
-          _clipboardIp = parsed?.ip;
-          _clipboardPort = parsed?.port;
+          _clipboardValid = true;
+          _clipboardValue = text;
         });
       }
     } catch (_) {
@@ -68,10 +60,9 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
   }
 
   void _autoFillFromClipboard() {
-    if (_clipboardIp != null && _clipboardPort != null) {
+    if (_clipboardValue != null) {
       setState(() {
-        _ipController.text = _clipboardIp!;
-        _portController.text = _clipboardPort.toString();
+        _controller.text = _clipboardValue!;
         _duplicateError = null;
       });
     }
@@ -79,8 +70,7 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
 
   @override
   void dispose() {
-    _ipController.dispose();
-    _portController.dispose();
+    _controller.dispose();
     super.dispose();
   }
 
@@ -102,7 +92,10 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
                 child: OutlinedButton.icon(
                   onPressed: _autoFillFromClipboard,
                   icon: const Icon(Icons.paste, size: 18),
-                  label: Text('自动填入 $_clipboardIp:$_clipboardPort'),
+                  label: Text(
+                    '粘贴剪切板地址',
+                    overflow: TextOverflow.ellipsis,
+                  ),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: theme.colorScheme.primary,
                     side: BorderSide(color: theme.colorScheme.primary),
@@ -114,39 +107,19 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
                 ),
               ),
             TextFormField(
-              controller: _ipController,
+              controller: _controller,
               decoration: const InputDecoration(
-                labelText: 'IP 地址',
-                hintText: '例: 203.0.113.42',
+                labelText: '对方地址',
+                hintText: '例: 192.168.1.1:12345,1.2.3.4:50001',
+                helperText: '支持多个候选地址，用逗号分隔',
+                helperMaxLines: 2,
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.computer),
               ),
-              keyboardType: TextInputType.number,
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[\d.]')),
-              ],
-              validator: Validators.validateIp,
-              onChanged: (_) {
-                if (_duplicateError != null) {
-                  setState(() => _duplicateError = null);
-                }
-              },
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _portController,
-              decoration: const InputDecoration(
-                labelText: '端口',
-                hintText: '例: 12345',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.numbers),
-              ),
-              keyboardType: TextInputType.number,
-              inputFormatters: [
-                FilteringTextInputFormatter.digitsOnly,
-                LengthLimitingTextInputFormatter(5),
-              ],
-              validator: Validators.validatePort,
+              keyboardType: TextInputType.text,
+              maxLines: 2,
+              minLines: 1,
+              validator: Validators.validateCandidateString,
               onChanged: (_) {
                 if (_duplicateError != null) {
                   setState(() => _duplicateError = null);
@@ -182,16 +155,15 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
   void _onAdd() {
     if (!_formKey.currentState!.validate()) return;
 
-    final ip = _ipController.text.trim();
-    final port = int.parse(_portController.text.trim());
+    final candidates = Validators.parseCandidates(_controller.text)!;
 
-    if (widget.peerExists(ip, port)) {
+    if (widget.peerExists(candidates)) {
       setState(() {
         _duplicateError = '该用户已在监听列表中';
       });
       return;
     }
 
-    Navigator.of(context).pop(AddPeerResult(ip, port));
+    Navigator.of(context).pop(AddPeerResult(candidates));
   }
 }
