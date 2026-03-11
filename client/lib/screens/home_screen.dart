@@ -5,7 +5,6 @@ import 'package:p2p_test/config/constants.dart';
 import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/providers/peer_provider.dart';
 import 'package:p2p_test/providers/self_info_provider.dart';
-import 'package:p2p_test/screens/stun_config_screen.dart';
 import 'package:p2p_test/widgets/add_peer_dialog.dart';
 import 'package:p2p_test/widgets/peer_card.dart';
 import 'package:p2p_test/widgets/public_address_card.dart';
@@ -18,17 +17,11 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<SelfInfoProvider>(
       builder: (context, selfInfo, _) {
-        switch (selfInfo.stunStatus) {
-          case StunStatus.loading:
-            return const StunLoadingView();
-          case StunStatus.failed:
-          case StunStatus.configuring:
-            return StunConfigScreen(
-              isFromFailure: selfInfo.stunStatus == StunStatus.failed,
-            );
-          case StunStatus.success:
-            return _MainContent();
+        if (selfInfo.stunStatus == StunStatus.loading &&
+            selfInfo.selfInfo.publicIp == null) {
+          return const StunLoadingView();
         }
+        return _MainContent();
       },
     );
   }
@@ -81,8 +74,8 @@ class _MainContent extends StatelessWidget {
 
             // Public address card
             PublicAddressCard(
-              onSettingsTap: () {
-                context.read<SelfInfoProvider>().enterConfiguring();
+              onRefreshTap: () {
+                context.read<SelfInfoProvider>().refresh();
               },
             ),
 

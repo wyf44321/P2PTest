@@ -3,38 +3,41 @@ class AppConstants {
 
   static const String appName = 'P2PTest';
   static const String appSubtitle = 'P2P 网络测试工具';
-  static const String appVersion = 'v2.3.0';
+  static const String appVersion = 'v3.0.0';
 
+  // STUN
   static const Duration stunTimeout = Duration(seconds: 5);
-  static const Duration holePunchTimeout = Duration(seconds: 30);
-  static const Duration holePunchInterval = Duration(milliseconds: 200);
 
-  static const Duration probeInterval = Duration(seconds: 1);
-  static const Duration degradedProbeInterval = Duration(minutes: 1);
-  static const Duration packetLossCalcInterval = Duration(seconds: 5);
+  // Keepalive: send STUN packet if socket idle for this duration
+  static const Duration keepaliveTimeout = Duration(seconds: 5);
 
-  static const int pingWindowSize = 30;
-  static const int pongTimeoutMs = 3000;
+  // Per-peer sending interval
+  static const Duration peerSendInterval = Duration(milliseconds: 10);
 
-  static const List<Duration> reconnectIntervals = [
-    Duration(seconds: 1),
-    Duration(seconds: 5),
-    Duration(seconds: 10),
-    Duration(seconds: 30),
-    Duration(seconds: 60),
-  ];
+  // No reply for this long → timeout (reconnect or disconnect)
+  static const Duration peerReplyTimeout = Duration(minutes: 1);
+
+  // Maximum reconnect attempts before marking disconnected
   static const int maxReconnectAttempts = 5;
 
+  // Symmetric NAT port prediction: time-compensated dual-zone scanning
+  static const int symmetricBatchSize = 32;
+
+  // Hot zone: tight window around estimated center, scanned with 2/3 of batch
+  static const int symmetricHotRadius = 64;
+
+  // Extended zone: adaptive wider window, scanned with 1/3 of batch
+  static const int symmetricMinExtRadius = 128;
+  static const int symmetricMaxExtRadius = 2048;
+
+  // Fallback range when no velocity data (old metadata format)
+  static const int symmetricFallbackRange = 256;
+
+  // How long to try private (LAN) candidates before falling back to public
+  static const Duration privatePhaseDuration = Duration(seconds: 3);
+
+  // Ping/pong interval for latency & loss measurement (after connection)
+  static const Duration pingInterval = Duration(milliseconds: 500);
+
   static const int maxMonitoredPeers = 20;
-
-  /// Port prediction kicks in after this delay within a hole-punch attempt.
-  static const Duration portPredictionDelay = Duration(seconds: 1);
-
-  /// Number of delta-steps to try when the port allocation pattern is
-  /// consistent (each step = observed delta, both directions).
-  static const int portPredictionRangeConsistent = 20;
-
-  /// Number of ports to try on each side when the allocation pattern is
-  /// unpredictable (sequential ±1 scan + delta-based guesses).
-  static const int portPredictionRangeWide = 100;
 }

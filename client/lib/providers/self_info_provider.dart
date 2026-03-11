@@ -1,11 +1,12 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
 import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/services/ip_geo_service.dart';
-import 'package:p2p_test/services/storage_service.dart';
 import 'package:p2p_test/services/stun_service.dart';
+import 'package:p2p_test/services/storage_service.dart';
 import 'package:p2p_test/services/udp_service.dart';
 import 'package:p2p_test/utils/logger.dart';
 
@@ -17,6 +18,10 @@ class SelfInfoProvider extends ChangeNotifier {
   final IpGeoService _ipGeoService;
 
   SelfInfo _selfInfo = const SelfInfo();
+
+  /// The STUN server that succeeded, used for keepalive.
+  String? _activeStunHost;
+  int? _activeStunPort;
 
   SelfInfoProvider({
     required UdpService udpService,
@@ -33,16 +38,14 @@ class SelfInfoProvider extends ChangeNotifier {
   String get candidateString => _selfInfo.candidateString;
   String? get errorMessage => _selfInfo.errorMessage;
   String? get ipLocation => _selfInfo.ipLocation;
-  NatType get natType => _selfInfo.natType;
-  int? get portDelta => _selfInfo.portDelta;
-  bool get isConsistentDelta => _selfInfo.isConsistentDelta;
+  String? get natType => _selfInfo.natType;
+  String? get natMetadata => _selfInfo.natMetadata;
 
   Future<void> initialize() async {
     _selfInfo = _selfInfo.copyWith(stunStatus: StunStatus.loading);
     notifyListeners();
 
     try {
-      // Bind UDP socket
       final localPort = await _udpService.bind();
       final localIps = await _getAllLocalIps();
       final localIp = localIps.isNotEmpty ? localIps.first : null;
@@ -52,13 +55,11 @@ class SelfInfoProvider extends ChangeNotifier {
         localIps: localIps,
       );
 
-      // Load saved STUN config
       final config = await _storageService.loadStunConfig();
       if (config != null) {
         _selfInfo = _selfInfo.copyWith(stunConfig: config);
       }
 
-      // Fetch public address
       await fetchPublicAddress(stunServer: config?.selectedServer);
     } catch (e) {
       AppLogger.error(_tag, 'Initialization failed', e);
@@ -70,10 +71,12 @@ class SelfInfoProvider extends ChangeNotifier {
     }
   }
 
+  /// Query ALL STUN servers to detect NAT type, then display last result.
   Future<void> fetchPublicAddress({String? stunServer}) async {
     _selfInfo = _selfInfo.copyWith(
       stunStatus: StunStatus.loading,
       clearError: true,
+      clearNat: true,
     );
     notifyListeners();
 
@@ -86,27 +89,35 @@ class SelfInfoProvider extends ChangeNotifier {
       return;
     }
 
+    _udpService.pauseKeepalive();
     try {
-      final detection = await StunService.detectNatType(
+      final analysis = await StunService.analyzeNat(
         _udpService,
         preferredServer: stunServer,
       );
-      final result = detection.primaryResult;
+
+      final lastResult = analysis.lastResult;
+      _activeStunHost = lastResult.stunHost;
+      _activeStunPort = lastResult.stunPort;
+
       _selfInfo = _selfInfo.copyWith(
-        publicIp: result.publicIp,
-        publicPort: result.publicPort,
+        publicIp: lastResult.publicIp,
+        publicPort: lastResult.publicPort,
         stunStatus: StunStatus.success,
-        natType: detection.natType,
-        portDelta: detection.portDelta,
-        isConsistentDelta: detection.isConsistentDelta,
+        natType: analysis.natType,
+        natMetadata: analysis.metadata,
         clearError: true,
         clearIpLocation: true,
       );
       AppLogger.info(_tag,
-          'Public address: ${_selfInfo.publicAddress}, NAT: ${detection.natType.label}');
+          'Public address: ${_selfInfo.publicAddress}, NAT: ${analysis.metadata}');
       notifyListeners();
 
-      _queryIpLocation(result.publicIp);
+      _queryIpLocation(lastResult.publicIp);
+
+      await _udpService.setKeepaliveStunServer(
+          lastResult.stunHost, lastResult.stunPort);
+
       return;
     } catch (e) {
       AppLogger.error(_tag, 'Failed to fetch public address', e);
@@ -114,34 +125,15 @@ class SelfInfoProvider extends ChangeNotifier {
         stunStatus: StunStatus.failed,
         errorMessage: e.toString(),
       );
+      _udpService.resumeKeepalive();
     }
     notifyListeners();
   }
 
-  void enterConfiguring() {
-    _selfInfo = _selfInfo.copyWith(stunStatus: StunStatus.configuring);
-    notifyListeners();
-  }
-
-  void cancelConfiguring() {
-    _selfInfo = _selfInfo.copyWith(stunStatus: StunStatus.success);
-    notifyListeners();
-  }
-
-  Future<void> saveStunConfig(String? server, bool isCustom) async {
-    final config = StunConfig(
-      selectedServer: server,
-      isCustom: isCustom,
-      updatedAt: DateTime.now(),
-    );
-    _selfInfo = _selfInfo.copyWith(stunConfig: config);
-    await _storageService.saveStunConfig(config);
-    notifyListeners();
-  }
-
-  Future<void> retryWithServer(String? server, bool isCustom) async {
-    await saveStunConfig(server, isCustom);
-    await fetchPublicAddress(stunServer: server);
+  Future<void> refresh() async {
+    _activeStunHost = null;
+    _activeStunPort = null;
+    await fetchPublicAddress(stunServer: _selfInfo.stunConfig?.selectedServer);
   }
 
   Future<void> _queryIpLocation(String ip) async {
@@ -155,6 +147,11 @@ class SelfInfoProvider extends ChangeNotifier {
       _selfInfo = _selfInfo.copyWith(ipLocation: '未知');
       notifyListeners();
     }
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
   }
 
   static Future<List<String>> _getAllLocalIps() async {

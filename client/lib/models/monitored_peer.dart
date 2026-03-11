@@ -1,14 +1,12 @@
 import 'package:flutter/foundation.dart';
 
 import 'package:p2p_test/models/peer_candidate.dart';
-import 'package:p2p_test/models/self_info.dart';
 
 enum ConnectionStatus {
   connecting,
   connected,
   reconnecting,
   disconnected,
-  degradedMonitoring,
   failed,
 }
 
@@ -23,8 +21,6 @@ extension ConnectionStatusDisplay on ConnectionStatus {
         return '重连中';
       case ConnectionStatus.disconnected:
         return '已断开';
-      case ConnectionStatus.degradedMonitoring:
-        return '已断开（每分钟探测）';
       case ConnectionStatus.failed:
         return '连接失败';
     }
@@ -40,8 +36,6 @@ extension ConnectionStatusDisplay on ConnectionStatus {
         return 'orange';
       case ConnectionStatus.disconnected:
         return 'red';
-      case ConnectionStatus.degradedMonitoring:
-        return 'grey';
       case ConnectionStatus.failed:
         return 'red';
     }
@@ -58,14 +52,12 @@ class MonitoredPeer {
   final int? activePort;
   final String? ipLocation;
   final ConnectionStatus status;
-  final int? rttMs;
-  final double? packetLoss;
   final DateTime createdAt;
   final DateTime? lastConnectedAt;
   final int reconnectCount;
-  final NatType peerNatType;
-  final int? peerPortDelta;
-  final bool peerIsConsistentDelta;
+  final String? natMetadata;
+  final double? latencyMs;
+  final double? packetLossPercent;
 
   const MonitoredPeer({
     required this.id,
@@ -76,46 +68,53 @@ class MonitoredPeer {
     this.activePort,
     this.ipLocation,
     this.status = ConnectionStatus.connecting,
-    this.rttMs,
-    this.packetLoss,
     required this.createdAt,
     this.lastConnectedAt,
     this.reconnectCount = 0,
-    this.peerNatType = NatType.unknown,
-    this.peerPortDelta,
-    this.peerIsConsistentDelta = false,
+    this.natMetadata,
+    this.latencyMs,
+    this.packetLossPercent,
   });
 
-  /// The primary display address (first public or first candidate).
   String get address => '$ip:$port';
 
-  /// The address currently used for communication.
   String get activeAddress =>
       (activeIp != null && activePort != null)
           ? '$activeIp:$activePort'
           : address;
 
-  /// Effective IP for communication (active or fallback to primary).
   String get effectiveIp => activeIp ?? ip;
 
-  /// Effective port for communication (active or fallback to primary).
   int get effectivePort => activePort ?? port;
 
-  /// All candidates to try during hole punch. Falls back to primary address.
   List<PeerCandidate> get effectiveCandidates =>
       candidates.isNotEmpty
           ? candidates
           : [PeerCandidate(ip, port)];
 
-  String get displayRtt =>
-      (status == ConnectionStatus.connected && rttMs != null)
-          ? '${rttMs}ms'
-          : '--';
+  bool get isSymmetricNat =>
+      natMetadata != null && natMetadata!.startsWith('sym');
 
-  String get displayPacketLoss =>
-      (status == ConnectionStatus.connected && packetLoss != null)
-          ? '${packetLoss!.toStringAsFixed(1)}%'
-          : '--';
+  int? get symmetricPortStep {
+    if (natMetadata == null) return null;
+    final match = RegExp(r'd=(\d+)').firstMatch(natMetadata!);
+    if (match == null) return null;
+    return int.tryParse(match.group(1)!);
+  }
+
+  int? get symmetricPortVelocity {
+    if (natMetadata == null) return null;
+    final match = RegExp(r'v=(\d+)').firstMatch(natMetadata!);
+    if (match == null) return null;
+    return int.tryParse(match.group(1)!);
+  }
+
+  int? get symmetricProbeTimestamp {
+    if (natMetadata == null) return null;
+    final match = RegExp(r't=(\d+)').firstMatch(natMetadata!);
+    if (match == null) return null;
+    return int.tryParse(match.group(1)!);
+  }
 
   String get displayLocation {
     if (ipLocation == null) return '查询中...';
@@ -129,7 +128,15 @@ class MonitoredPeer {
     return status.label;
   }
 
-  bool get usePeerPortPrediction => peerNatType == NatType.symmetric;
+  String get latencyDisplay {
+    if (latencyMs == null) return '-';
+    return '${latencyMs!.round()}ms';
+  }
+
+  String get lossDisplay {
+    if (packetLossPercent == null) return '-';
+    return '${packetLossPercent!.toStringAsFixed(1)}%';
+  }
 
   MonitoredPeer copyWith({
     String? id,
@@ -140,17 +147,14 @@ class MonitoredPeer {
     int? activePort,
     String? ipLocation,
     ConnectionStatus? status,
-    int? rttMs,
-    double? packetLoss,
     DateTime? createdAt,
     DateTime? lastConnectedAt,
     int? reconnectCount,
-    NatType? peerNatType,
-    int? peerPortDelta,
-    bool? peerIsConsistentDelta,
-    bool clearRtt = false,
-    bool clearPacketLoss = false,
+    String? natMetadata,
+    double? latencyMs,
+    double? packetLossPercent,
     bool clearActive = false,
+    bool clearStats = false,
   }) {
     return MonitoredPeer(
       id: id ?? this.id,
@@ -161,15 +165,14 @@ class MonitoredPeer {
       activePort: clearActive ? null : (activePort ?? this.activePort),
       ipLocation: ipLocation ?? this.ipLocation,
       status: status ?? this.status,
-      rttMs: clearRtt ? null : (rttMs ?? this.rttMs),
-      packetLoss: clearPacketLoss ? null : (packetLoss ?? this.packetLoss),
       createdAt: createdAt ?? this.createdAt,
       lastConnectedAt: lastConnectedAt ?? this.lastConnectedAt,
       reconnectCount: reconnectCount ?? this.reconnectCount,
-      peerNatType: peerNatType ?? this.peerNatType,
-      peerPortDelta: peerPortDelta ?? this.peerPortDelta,
-      peerIsConsistentDelta:
-          peerIsConsistentDelta ?? this.peerIsConsistentDelta,
+      natMetadata: natMetadata ?? this.natMetadata,
+      latencyMs: clearStats ? null : (latencyMs ?? this.latencyMs),
+      packetLossPercent: clearStats
+          ? null
+          : (packetLossPercent ?? this.packetLossPercent),
     );
   }
 
@@ -180,6 +183,7 @@ class MonitoredPeer {
       'port': port,
       'candidates': candidates.map((c) => c.toJson()).toList(),
       'created_at': createdAt.toIso8601String(),
+      'nat_metadata': natMetadata,
     };
   }
 
@@ -196,6 +200,7 @@ class MonitoredPeer {
           : [],
       createdAt: DateTime.parse(json['created_at'] as String),
       status: ConnectionStatus.connecting,
+      natMetadata: json['nat_metadata'] as String?,
     );
   }
 }

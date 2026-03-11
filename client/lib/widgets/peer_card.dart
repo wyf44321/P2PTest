@@ -22,7 +22,6 @@ class PeerCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Address
             Text(
               peer.address,
               style: theme.textTheme.titleMedium?.copyWith(
@@ -42,13 +41,25 @@ class PeerCard extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 4),
-            // IP Location
+            // IP Location - separate row, two lines max
             Text(
               '归属地: ${peer.displayLocation}',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
+            if (peer.natMetadata != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                'NAT: ${peer.natMetadata}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontFamily: 'monospace',
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             // Status row
             Row(
@@ -66,17 +77,26 @@ class PeerCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 6),
-            // Metrics row
-            Row(
-              children: [
-                _buildMetric(
-                    context, Icons.timer_outlined, '延迟', peer.displayRtt),
-                const SizedBox(width: 24),
-                _buildMetric(context, Icons.signal_cellular_alt, '丢包',
-                    peer.displayPacketLoss),
-              ],
-            ),
+            if (peer.status == ConnectionStatus.connected) ...[
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  _buildStatChip(
+                    context,
+                    '延迟',
+                    peer.latencyDisplay,
+                    _latencyColor(peer.latencyMs),
+                  ),
+                  const SizedBox(width: 12),
+                  _buildStatChip(
+                    context,
+                    '丢包',
+                    peer.lossDisplay,
+                    _lossColor(peer.packetLossPercent),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -94,31 +114,6 @@ class PeerCard extends StatelessWidget {
     );
   }
 
-  Widget _buildMetric(
-      BuildContext context, IconData icon, String label, String value) {
-    final theme = Theme.of(context);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
-        const SizedBox(width: 4),
-        Text(
-          '$label: ',
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        Text(
-          value,
-          style: theme.textTheme.bodySmall?.copyWith(
-            fontWeight: FontWeight.w600,
-            fontFamily: 'monospace',
-          ),
-        ),
-      ],
-    );
-  }
-
   Color _statusColor(ConnectionStatus status) {
     switch (status) {
       case ConnectionStatus.connecting:
@@ -129,10 +124,52 @@ class PeerCard extends StatelessWidget {
         return Colors.orange;
       case ConnectionStatus.disconnected:
         return Colors.red;
-      case ConnectionStatus.degradedMonitoring:
-        return Colors.grey;
       case ConnectionStatus.failed:
         return Colors.red;
     }
+  }
+
+  Widget _buildStatChip(
+      BuildContext context, String label, String value, Color color) {
+    final theme = Theme.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          '$label: ',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        Text(
+          value,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: color,
+            fontWeight: FontWeight.w600,
+            fontFamily: 'monospace',
+          ),
+        ),
+      ],
+    );
+  }
+
+  Color _latencyColor(double? ms) {
+    if (ms == null) return Colors.grey;
+    if (ms < 100) return Colors.green;
+    if (ms < 300) return Colors.amber;
+    return Colors.red;
+  }
+
+  Color _lossColor(double? percent) {
+    if (percent == null) return Colors.grey;
+    if (percent < 1) return Colors.green;
+    if (percent < 5) return Colors.amber;
+    return Colors.red;
   }
 }

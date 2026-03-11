@@ -1,18 +1,13 @@
 import 'package:p2p_test/models/peer_candidate.dart';
-import 'package:p2p_test/models/self_info.dart';
 
-/// Parsed result of a candidate string that may include NAT metadata.
+/// Parsed result of a candidate string, optionally with NAT metadata.
 class ParsedCandidateInput {
   final List<PeerCandidate> candidates;
-  final NatType peerNatType;
-  final int? peerPortDelta;
-  final bool peerIsConsistentDelta;
+  final String? natMetadata;
 
   const ParsedCandidateInput({
     required this.candidates,
-    this.peerNatType = NatType.unknown,
-    this.peerPortDelta,
-    this.peerIsConsistentDelta = false,
+    this.natMetadata,
   });
 }
 
@@ -88,22 +83,12 @@ class Validators {
     return false;
   }
 
-  /// Split raw input into the address part and optional metadata part.
-  static (String addrs, String? meta) _splitMeta(String value) {
-    final pipeIdx = value.indexOf('|');
-    if (pipeIdx < 0) return (value, null);
-    return (value.substring(0, pipeIdx), value.substring(pipeIdx + 1));
-  }
-
-  /// Parse a candidate string like "192.168.1.100:12345,1.2.3.4:50001"
-  /// or "192.168.1.100:12345,1.2.3.4:50001|sym,d=2,c=1"
-  /// into a list of PeerCandidate. Returns null if the string is invalid.
+  /// Parse the address portion (before "|") into a list of PeerCandidate.
   static List<PeerCandidate>? parseCandidates(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return null;
 
-    final (addrPart, _) = _splitMeta(trimmed);
-    final segments = addrPart.split(',');
+    final segments = trimmed.split(',');
     final candidates = <PeerCandidate>[];
 
     for (final seg in segments) {
@@ -115,47 +100,27 @@ class Validators {
     return candidates.isEmpty ? null : candidates;
   }
 
-  /// Parse a candidate string with optional NAT metadata.
-  /// Returns null if the address part is invalid.
+  /// Parse a candidate string that may contain NAT metadata after "|".
+  /// Format: "ip:port,ip:port|natMetadata"
   static ParsedCandidateInput? parseCandidateInput(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return null;
 
-    final (addrPart, metaPart) = _splitMeta(trimmed);
-    final candidates = <PeerCandidate>[];
+    String addrPart = trimmed;
+    String? natMeta;
 
-    for (final seg in addrPart.split(',')) {
-      final parsed = parseIpPort(seg.trim());
-      if (parsed == null) return null;
-      candidates.add(PeerCandidate(parsed.ip, parsed.port));
-    }
-    if (candidates.isEmpty) return null;
-
-    var natType = NatType.unknown;
-    int? portDelta;
-    bool isConsistent = false;
-
-    if (metaPart != null && metaPart.isNotEmpty) {
-      final tokens = metaPart.split(',');
-      for (final token in tokens) {
-        final t = token.trim();
-        if (t == 'sym') {
-          natType = NatType.symmetric;
-        } else if (t == 'cone') {
-          natType = NatType.cone;
-        } else if (t.startsWith('d=')) {
-          portDelta = int.tryParse(t.substring(2));
-        } else if (t.startsWith('c=')) {
-          isConsistent = t.substring(2) == '1';
-        }
-      }
+    final pipeIdx = trimmed.indexOf('|');
+    if (pipeIdx >= 0) {
+      addrPart = trimmed.substring(0, pipeIdx).trim();
+      natMeta = trimmed.substring(pipeIdx + 1).trim();
+      if (natMeta.isEmpty) natMeta = null;
     }
 
+    final candidates = parseCandidates(addrPart);
+    if (candidates == null) return null;
     return ParsedCandidateInput(
       candidates: candidates,
-      peerNatType: natType,
-      peerPortDelta: portDelta,
-      peerIsConsistentDelta: isConsistent,
+      natMetadata: natMeta,
     );
   }
 
@@ -164,9 +129,9 @@ class Validators {
     if (value == null || value.trim().isEmpty) {
       return '请输入对方地址';
     }
-    final candidates = parseCandidates(value);
-    if (candidates == null) {
-      return '地址格式错误，示例: 192.168.1.1:12345 或 192.168.1.1:12345,1.2.3.4:50001';
+    final input = parseCandidateInput(value);
+    if (input == null) {
+      return '地址格式错误，示例: 1.2.3.4:50001 或 1.2.3.4:50001|sym,d=2';
     }
     return null;
   }

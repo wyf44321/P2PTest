@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:p2p_test/app/theme.dart';
-import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/providers/peer_provider.dart';
 import 'package:p2p_test/providers/self_info_provider.dart';
+import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/screens/home_screen.dart';
 import 'package:p2p_test/services/ip_geo_service.dart';
 import 'package:p2p_test/services/monitor_service.dart';
@@ -46,10 +46,8 @@ class _P2PTestAppState extends State<P2PTestApp> with WidgetsBindingObserver {
     );
 
     _peerProvider = PeerProvider(
-      udpService: _udpService,
       monitorService: _monitorService,
       ipGeoService: _ipGeoService,
-      selfInfoProvider: _selfInfoProvider,
     );
 
     _startup();
@@ -57,24 +55,6 @@ class _P2PTestAppState extends State<P2PTestApp> with WidgetsBindingObserver {
 
   Future<void> _startup() async {
     await _selfInfoProvider.initialize();
-
-    _selfInfoProvider.addListener(_onStunStatusChanged);
-    if (_selfInfoProvider.stunStatus == StunStatus.success) {
-      _startMonitor();
-    }
-  }
-
-  bool _peersLoaded = false;
-
-  void _onStunStatusChanged() {
-    if (_selfInfoProvider.stunStatus == StunStatus.success && !_peersLoaded) {
-      _startMonitor();
-    }
-  }
-
-  void _startMonitor() {
-    _peersLoaded = true;
-    _monitorService.startTimers();
   }
 
   @override

@@ -109,7 +109,7 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
               controller: _controller,
               decoration: const InputDecoration(
                 labelText: '对方地址',
-                hintText: '例: 1.2.3.4:50001|sym,d=2,c=1',
+                hintText: '例: 1.2.3.4:50001|sym,d=2',
                 helperText: '粘贴对方的候选地址，NAT 元数据可省略',
                 helperMaxLines: 2,
                 border: OutlineInputBorder(),

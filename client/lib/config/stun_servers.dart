@@ -20,14 +20,18 @@ class StunServers {
   StunServers._();
 
   static const StunServerOption initialDefault =
-      StunServerOption('Cloudflare', 'stun.cloudflare.com', 3478);
+      StunServerOption('Google STUN 4', 'stun4.l.google.com', 19302);
 
   static const List<StunServerOption> defaultServers = [
+    StunServerOption('Google STUN 4', 'stun4.l.google.com', 19302),
     StunServerOption('Cloudflare', 'stun.cloudflare.com', 3478),
-    StunServerOption('Google STUN', 'stun.l.google.com', 19302),
-    StunServerOption('Google STUN 1', 'stun1.l.google.com', 19302),
-    StunServerOption('Google STUN 2', 'stun2.l.google.com', 19302),
+    StunServerOption('Sonetel', 'stun.sonetel.net', 3478),
+    StunServerOption('AEBC VoIP', 'stun.voip.aebc.com', 3478),
+    StunServerOption('Ippi', 'stun.ippi.fr', 3478),
+    StunServerOption('FreeSWITCH', 'stun.freeswitch.org', 3478),
+    StunServerOption('MyWatson', 'stun.mywatson.it', 3478),
+    StunServerOption('USFamily', 'stun.usfamily.net', 3478),
     StunServerOption('Nextcloud', 'stun.nextcloud.com', 443),
-    StunServerOption('VoIPBuster', 'stun.voipbuster.com', 3478),
+    StunServerOption('VozTele', 'stun.voztele.com', 3478),
   ];
 }
