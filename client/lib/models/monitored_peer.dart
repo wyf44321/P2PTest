@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'package:p2p_test/models/peer_candidate.dart';
+import 'package:p2p_test/utils/validators.dart';
 
 enum ConnectionStatus {
   connecting,
@@ -76,11 +77,11 @@ class MonitoredPeer {
     this.packetLossPercent,
   });
 
-  String get address => '$ip:$port';
+  String get address => Validators.formatAddress(ip, port);
 
   String get activeAddress =>
       (activeIp != null && activePort != null)
-          ? '$activeIp:$activePort'
+          ? Validators.formatAddress(activeIp!, activePort!)
           : address;
 
   String get effectiveIp => activeIp ?? ip;

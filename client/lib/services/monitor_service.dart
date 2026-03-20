@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -33,10 +34,21 @@ class _PeerSendState {
   final List<PeerCandidate> candidates;
   final String targetIp;
   final int basePort;
+
+  /// True if the PEER is behind a symmetric NAT (port changes per dest).
   final bool isSymmetric;
+
+  /// True if WE are behind a symmetric NAT. When true, main socket scanning
+  /// must be suppressed — each packet to a different port burns a NAT
+  /// allocation, destroying our own predictability.
+  final bool ownIsSymmetric;
+
   final int portStep;
   final double portVelocity;
   final double probeTimestamp;
+
+  /// Port parity from peer's NAT analysis: 0=even, 1=odd, -1=mixed/unknown
+  final int portParity;
 
   Timer? sendTimer;
   Timer? timeoutChecker;
@@ -59,6 +71,17 @@ class _PeerSendState {
 
   /// Cycles through the port range for symmetric NAT scanning.
   int sendCycleIndex = 0;
+
+  /// When ownIsSymmetric + isSymmetric: main socket sends to this single
+  /// port instead of scanning. Rotated slowly to avoid burning NAT ports.
+  int? singleTargetPort;
+  int singleTargetRotation = 0;
+
+  // --- Birthday attack (multi-socket) for symmetric NAT ---
+  final List<RawDatagramSocket> auxSockets = [];
+  final List<int> auxTargetPorts = [];
+  Timer? auxSendTimer;
+  Timer? auxReshuffleTimer;
 
   // Ping/pong stats
   int nextPingSeq = 0;
@@ -83,14 +106,19 @@ class _PeerSendState {
     required this.targetIp,
     required this.basePort,
     required this.isSymmetric,
+    this.ownIsSymmetric = false,
     required this.portStep,
     this.portVelocity = 0,
     this.probeTimestamp = 0,
+    this.portParity = -1,
   })  : startedAt = DateTime.now(),
         privateCandidates =
             candidates.where((c) => Validators.isPrivateIp(c.ip)).toList(),
         publicCandidates =
             candidates.where((c) => !Validators.isPrivateIp(c.ip)).toList();
+
+  /// True when both sides are symmetric — the hardest scenario.
+  bool get bothSymmetric => isSymmetric && ownIsSymmetric;
 }
 
 class MonitorService {
@@ -108,8 +136,26 @@ class MonitorService {
   final Map<String, _PeerSendState> _peerStates = {};
   Timer? _statsTimer;
 
+  /// Our own NAT type: true if we are behind a symmetric NAT.
+  /// Updated by the app layer after STUN analysis completes.
+  bool _ownIsSymmetric = false;
+
   MonitorService({required this.udpService}) {
     udpService.onPeerPacketReceived = _onPacketReceived;
+  }
+
+  /// Called after our own NAT analysis completes so we can adapt sending
+  /// strategy: when we are also symmetric, port scanning from the main socket
+  /// must be stopped — each packet to a different destination port consumes a
+  /// new external port allocation, making us unpredictable to the peer.
+  void setOwnNatType(String? natMetadata) {
+    final wasSym = _ownIsSymmetric;
+    _ownIsSymmetric =
+        natMetadata != null && natMetadata.startsWith('sym');
+    if (wasSym != _ownIsSymmetric) {
+      AppLogger.info(_tag,
+          'Own NAT type updated: symmetric=$_ownIsSymmetric');
+    }
   }
 
   /// Start sending to a peer immediately after adding.
@@ -130,32 +176,42 @@ class MonitorService {
     int portStep = 1;
     double portVelocity = 0;
     double probeTimestamp = 0;
+    int portParity = -1;
     if (isSymmetric) {
-      final stepMatch = RegExp(r'd=(\d+)').firstMatch(natMetadata!);
+      final meta = natMetadata;
+      final stepMatch = RegExp(r'd=(\d+)').firstMatch(meta);
       if (stepMatch != null) {
         portStep = int.tryParse(stepMatch.group(1)!) ?? 1;
       }
-      final velMatch = RegExp(r'v=(\d+)').firstMatch(natMetadata!);
+      final velMatch = RegExp(r'v=(\d+)').firstMatch(meta);
       if (velMatch != null) {
         portVelocity = (int.tryParse(velMatch.group(1)!) ?? 0).toDouble();
       }
-      final tsMatch = RegExp(r't=(\d+)').firstMatch(natMetadata!);
+      final tsMatch = RegExp(r't=(\d+)').firstMatch(meta);
       if (tsMatch != null) {
         probeTimestamp = (int.tryParse(tsMatch.group(1)!) ?? 0).toDouble();
+      }
+      final parityMatch = RegExp(r'p=(\d+)').firstMatch(meta);
+      if (parityMatch != null) {
+        portParity = int.tryParse(parityMatch.group(1)!) ?? -1;
       }
     }
 
     final allPrivate = candidates.every((c) => Validators.isPrivateIp(c.ip));
+
+    final peerSym = isSymmetric && !allPrivate;
 
     final state = _PeerSendState(
       peerId: peerId,
       candidates: candidates,
       targetIp: primary.ip,
       basePort: primary.port,
-      isSymmetric: isSymmetric && !allPrivate,
+      isSymmetric: peerSym,
+      ownIsSymmetric: _ownIsSymmetric,
       portStep: portStep,
       portVelocity: portVelocity,
       probeTimestamp: probeTimestamp,
+      portParity: portParity,
     );
 
     _peerStates[peerId] = state;
@@ -164,10 +220,23 @@ class MonitorService {
     _startTimeoutChecker(state);
     _ensureStatsTimer();
 
+    if (peerSym) {
+      _setupBirthdaySockets(state);
+    }
+
+    final mode = state.bothSymmetric
+        ? 'SYM↔SYM (birthday only, no main scanning)'
+        : (peerSym
+            ? 'CONE→SYM (scanning + birthday)'
+            : (_ownIsSymmetric ? 'SYM→CONE (single target)' : 'CONE↔CONE'));
+
     AppLogger.info(_tag,
-        'Started sending to $peerId (symmetric=${state.isSymmetric}, '
+        'Started sending to $peerId [$mode] '
+        'peerSym=$peerSym, ownSym=$_ownIsSymmetric, '
         'step=$portStep, velocity=${portVelocity.round()}p/s, '
+        'parity=${portParity >= 0 ? (portParity == 0 ? "even" : "odd") : "mixed"}, '
         'probeTs=${probeTimestamp.round()}, '
+        'birthday=${peerSym ? (state.bothSymmetric ? AppConstants.birthdaySocketCountSymSym : AppConstants.birthdaySocketCount) : 0}, '
         'lan=${state.privateCandidates.length}, '
         'wan=${state.publicCandidates.length})');
   }
@@ -212,6 +281,7 @@ class MonitorService {
       state.timeoutChecker?.cancel();
       state.pingTimer?.cancel();
       state.fallbackTimer?.cancel();
+      _closeBirthdaySockets(state);
       AppLogger.debug(_tag, 'Stopped sending to $peerId');
     }
     if (_peerStates.isEmpty) {
@@ -267,33 +337,44 @@ class MonitorService {
       return;
     }
 
-    if (state.isSymmetric) {
-      _sendSymmetricPrediction(state);
+    if (state.bothSymmetric) {
+      // SYM↔SYM: main socket sends to ONE predicted port only.
+      // Scanning many ports would burn our own NAT allocations, making us
+      // unpredictable. Birthday sockets handle the broad coverage.
+      _sendSingleTargetKeepalive(state);
       return;
     }
 
+    if (state.isSymmetric) {
+      if (state.ownIsSymmetric) {
+        // SYM→SYM handled above, but defensive fallback
+        _sendSingleTargetKeepalive(state);
+      } else {
+        // CONE→SYM: our port is stable, scanning is safe
+        _sendSymmetricPrediction(state);
+      }
+      return;
+    }
+
+    if (state.ownIsSymmetric) {
+      // SYM→CONE: peer port is known and stable, just send to it.
+      // Don't scan — that wastes our NAT ports.
+      for (final c in state.candidates) {
+        udpService.sendRawByte(c.ip, c.port);
+      }
+      return;
+    }
+
+    // CONE↔CONE: simple case
     for (final c in state.candidates) {
       udpService.sendRawByte(c.ip, c.port);
     }
   }
 
-  /// Time-compensated dual-zone port prediction for symmetric NAT.
-  ///
-  /// Uses three features from the STUN probe:
-  /// - **basePort**: last observed public port (reference point)
-  /// - **velocity**: port consumption rate (ports/second)
-  /// - **probeTimestamp**: when the probe completed (epoch seconds)
-  ///
-  /// The algorithm estimates the current port position based on elapsed
-  /// time since the probe, then scans two zones with different priorities:
-  /// - **Hot zone** (center ± hotRadius): dense scanning, 2/3 of batch
-  /// - **Extended zone** (basePort → center + extRadius): wider coverage, 1/3 of batch
-  ///
-  /// NAT ports are monotonically increasing, so scanning is forward-biased.
-  /// The hot zone follows the estimated center as it drifts forward over
-  /// time, keeping the highest-probability ports under constant coverage.
-  void _sendSymmetricPrediction(_PeerSendState state) {
-    final batchSize = AppConstants.symmetricBatchSize;
+  /// SYM↔SYM: send from main socket to a single predicted port.
+  /// Rotated slowly (every ~100 cycles = 1 second) to avoid burning NAT ports
+  /// while still probing different ports over time.
+  void _sendSingleTargetKeepalive(_PeerSendState state) {
     final basePort = state.effectiveBasePort;
     final velocity = state.portVelocity;
     final probeTs = state.effectiveTimestamp;
@@ -301,54 +382,318 @@ class MonitorService {
     final nowSec = DateTime.now().millisecondsSinceEpoch / 1000.0;
     final elapsedSec =
         probeTs > 0 ? (nowSec - probeTs).clamp(0.0, 600.0) : 0.0;
+    final drift = velocity > 0 ? (velocity * elapsedSec).round() : 0;
+    final center = (basePort + drift).clamp(1024, 65535);
 
-    // Estimate where the port likely is now
+    // Rotate target every ~100 cycles (1 second at 10ms interval)
+    if (state.singleTargetPort == null ||
+        state.sendCycleIndex % 100 == 0) {
+      if (_isRandomAllocation(state)) {
+        // Random allocation NAT: pick random port in ephemeral range
+        state.singleTargetPort = 1024 + _random.nextInt(64512);
+      } else {
+        final step = max(1, state.portStep);
+        final offset = state.singleTargetRotation * step;
+        final raw = center + offset;
+        if (raw > 65535) {
+          state.singleTargetRotation = 0;
+          state.singleTargetPort = center;
+        } else {
+          state.singleTargetPort = raw.clamp(1024, 65535);
+        }
+      }
+      state.singleTargetRotation++;
+    }
+
+    state.sendCycleIndex++;
+    udpService.sendRawByte(state.targetIp, state.singleTargetPort!);
+  }
+
+  /// Detect random-allocation NAT: step >= 100 indicates ports are
+  /// essentially random, not sequentially allocated.
+  static bool _isRandomAllocation(_PeerSendState state) =>
+      state.portStep >= 100;
+
+  /// Time-compensated, step-aligned, parity-aware port prediction for symmetric NAT.
+  ///
+  /// Key improvements over naive sequential scanning:
+  ///
+  /// 1. **Step-aligned**: Scans at multiples of the NAT's allocation step
+  ///    (e.g., step=2 → only even/odd ports). This covers step× more range
+  ///    with the same batch size.
+  ///
+  /// 2. **Parity-aware**: If the peer's NAT only allocates even (or odd)
+  ///    ports, skips the other parity — effectively doubling useful range.
+  ///
+  /// 3. **Adaptive widening**: After many cycles without connection, gradually
+  ///    widens the scan range to handle cases where velocity estimation
+  ///    was inaccurate or background traffic caused unexpected drift.
+  ///
+  /// 4. **Birthday complement**: Works alongside auxiliary birthday sockets
+  ///    (stable, single-target mappings) — the main socket does broad
+  ///    scanning while birthday sockets provide anchored coverage.
+  void _sendSymmetricPrediction(_PeerSendState state) {
+    const batchSize = AppConstants.symmetricBatchSize;
+    final basePort = state.effectiveBasePort;
+    final velocity = state.portVelocity;
+    final probeTs = state.effectiveTimestamp;
+    final step = max(1, state.portStep);
+
+    final nowSec = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    final elapsedSec =
+        probeTs > 0 ? (nowSec - probeTs).clamp(0.0, 600.0) : 0.0;
+
     final drift = velocity > 0 ? (velocity * elapsedSec).round() : 0;
     final center = basePort + drift;
 
-    // Hot zone: tight window around estimated center
-    final hotRadius = AppConstants.symmetricHotRadius;
-    final hotStart = (center - hotRadius).clamp(basePort, 65535);
-    final hotEnd = (center + hotRadius).clamp(1, 65535);
-    final hotSize = max(1, hotEnd - hotStart);
+    // Adaptive widening: expand radii after prolonged scanning without reply
+    double widening = 1.0;
+    final cycle = state.sendCycleIndex;
+    if (cycle > AppConstants.symmetricWideningStartCycle) {
+      final over = cycle - AppConstants.symmetricWideningStartCycle;
+      widening = (1.0 + over / AppConstants.symmetricWideningDivisor)
+          .clamp(1.0, AppConstants.symmetricMaxWidening);
+    }
 
-    // Extended zone: covers full possible range for higher uncertainty
-    final extRadius = velocity > 0
+    // Hot zone: tight window around estimated center (step-aligned)
+    final hotRadiusSteps =
+        (AppConstants.symmetricHotRadius * widening).round();
+    final hotStartPort = _alignPort(
+        (center - hotRadiusSteps * step).clamp(1, 65535), basePort, step);
+    final hotEndPort = (center + hotRadiusSteps * step).clamp(1, 65535);
+    final hotSteps = max(1, (hotEndPort - hotStartPort) ~/ step);
+
+    // Extended zone: wider coverage (step-aligned)
+    final extRadiusRaw = velocity > 0
         ? (velocity * max(3.0, elapsedSec * 0.5))
             .round()
             .clamp(AppConstants.symmetricMinExtRadius,
                    AppConstants.symmetricMaxExtRadius)
         : AppConstants.symmetricFallbackRange;
-    final extStart = basePort;
-    final extEnd = (center + extRadius).clamp(1, 65535);
-    final extSize = max(1, extEnd - extStart);
+    final extRadius = (extRadiusRaw * widening).round();
+    final extStartPort = _alignPort(basePort, basePort, step);
+    final extEndPort = (center + extRadius).clamp(1, 65535);
+    final extSteps = max(1, (extEndPort - extStartPort) ~/ step);
 
-    // Split batch: 2/3 hot zone, 1/3 extended zone
-    final hotBatch = (batchSize * 2) ~/ 3;
-    final extBatch = batchSize - hotBatch;
+    const hotBatch = (batchSize * 2) ~/ 3;
+    const extBatch = batchSize - hotBatch;
 
-    // Hot zone: sequential cycle for dense coverage near center
-    final hotOffset = (state.sendCycleIndex * hotBatch) % hotSize;
+    // Hot zone: sequential cycle through step-aligned ports
+    final hotOffset = (cycle * hotBatch) % hotSteps;
     for (int i = 0; i < hotBatch; i++) {
-      final port = hotStart + ((hotOffset + i) % hotSize);
-      if (port >= 1 && port <= 65535) {
+      final port = hotStartPort + ((hotOffset + i) % hotSteps) * step;
+      if (_matchesParity(port, state.portParity) &&
+          port >= 1 && port <= 65535) {
         udpService.sendRawByte(state.targetIp, port);
       }
     }
 
-    // Extended zone: sequential cycle for broad coverage
-    final extOffset = (state.sendCycleIndex * extBatch) % extSize;
+    // Extended zone: sequential cycle through step-aligned ports
+    final extOffset = (cycle * extBatch) % extSteps;
     for (int i = 0; i < extBatch; i++) {
-      final port = extStart + ((extOffset + i) % extSize);
-      if (port >= 1 && port <= 65535) {
+      final port = extStartPort + ((extOffset + i) % extSteps) * step;
+      if (_matchesParity(port, state.portParity) &&
+          port >= 1 && port <= 65535) {
         udpService.sendRawByte(state.targetIp, port);
       }
     }
 
     state.sendCycleIndex++;
 
-    // Always probe basePort itself as anchor
     udpService.sendRawByte(state.targetIp, basePort);
+  }
+
+  /// Align a port to the nearest step-multiple from the base,
+  /// clamped to valid port range [1, 65535].
+  static int _alignPort(int port, int base, int step) {
+    if (step <= 1) return port.clamp(1, 65535);
+    final offset = ((port - base) % step + step) % step;
+    final aligned = offset == 0 ? port : port + (step - offset);
+    if (aligned > 65535) return port - offset;
+    return aligned.clamp(1, 65535);
+  }
+
+  /// Check if a port matches the expected parity (0=even, 1=odd, -1=any).
+  static bool _matchesParity(int port, int parity) {
+    if (parity < 0) return true;
+    return (port % 2) == parity;
+  }
+
+  // --- Birthday attack: multi-socket for symmetric NAT ---
+  //
+  // Opens K auxiliary sockets, each targeting one predicted port on the peer.
+  // Each socket creates exactly one stable NAT mapping (our_ext_port → peer:target).
+  // The peer's scanning has K× more targets to hit, dramatically improving
+  // collision probability for symmetric-to-symmetric NAT traversal.
+  //
+  // From the birthday paradox: with K sockets per side and port range R,
+  // P(match) ≈ 1 - e^(-K²/R). For K=16, R=256: P ≈ 64%.
+
+  final Random _random = Random();
+
+  Future<void> _setupBirthdaySockets(_PeerSendState state) async {
+    _closeBirthdaySockets(state);
+
+    final count = state.bothSymmetric
+        ? AppConstants.birthdaySocketCountSymSym
+        : AppConstants.birthdaySocketCount;
+    final targets = _pickBirthdayTargets(state, count);
+
+    final bindAddr = state.targetIp.contains(':')
+        ? InternetAddress.anyIPv6
+        : InternetAddress.anyIPv4;
+
+    for (int i = 0; i < count; i++) {
+      try {
+        final socket =
+            await RawDatagramSocket.bind(bindAddr, 0);
+        state.auxSockets.add(socket);
+        state.auxTargetPorts.add(targets[i]);
+
+        socket.listen((event) {
+          if (event != RawSocketEvent.read) return;
+          Datagram? dg;
+          while ((dg = socket.receive()) != null) {
+            _onAuxPacketReceived(state, dg!);
+          }
+        });
+      } catch (e) {
+        AppLogger.warning(_tag,
+            'Peer ${state.peerId}: failed to open birthday socket #$i: $e');
+        break;
+      }
+    }
+
+    // Periodically send from each auxiliary socket to its target
+    state.auxSendTimer?.cancel();
+    state.auxSendTimer =
+        Timer.periodic(AppConstants.birthdaySendInterval, (_) {
+      if (state.connected || state.disconnected) return;
+      _sendBirthdayPackets(state);
+    });
+
+    // Periodically reshuffle targets if still not connected
+    state.auxReshuffleTimer?.cancel();
+    state.auxReshuffleTimer =
+        Timer.periodic(AppConstants.birthdayReshuffleInterval, (_) {
+      if (state.connected || state.disconnected) return;
+      _reshuffleBirthdayTargets(state);
+    });
+
+    AppLogger.info(_tag,
+        'Peer ${state.peerId}: opened ${state.auxSockets.length} birthday sockets, '
+        'targets=${targets.take(5).join(",")}...');
+  }
+
+  List<int> _pickBirthdayTargets(_PeerSendState state, int count) {
+    // Random-allocation NAT (step >= 100): ports are essentially random.
+    // Spread birthday sockets randomly across the full ephemeral port range.
+    if (_isRandomAllocation(state)) {
+      return _pickRandomBirthdayTargets(count);
+    }
+
+    final basePort = state.effectiveBasePort;
+    final velocity = state.portVelocity;
+    final probeTs = state.effectiveTimestamp;
+    final step = max(1, state.portStep);
+
+    final nowSec = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    final elapsedSec =
+        probeTs > 0 ? (nowSec - probeTs).clamp(0.0, 600.0) : 0.0;
+    final drift = velocity > 0 ? (velocity * elapsedSec).round() : 0;
+    final center = (basePort + drift).clamp(1024, 65535);
+
+    final velocityRange =
+        velocity > 0 ? (velocity * max(5.0, elapsedSec)).round() : 0;
+    final range = max(
+      count * step * 2,
+      velocityRange.clamp(
+          AppConstants.birthdayRangeMin, AppConstants.birthdayRangeMax),
+    );
+
+    final rangeStart = (center - range ~/ 4).clamp(1024, 65535);
+
+    final targets = <int>[];
+    final spacing = max(step, range ~/ count);
+    for (int i = 0; i < count; i++) {
+      var port = _alignPort(rangeStart + i * spacing, basePort, step);
+      port = port.clamp(1024, 65535);
+      if (!_matchesParity(port, state.portParity)) {
+        port = (port + 1).clamp(1024, 65535);
+      }
+      targets.add(port);
+    }
+    return targets;
+  }
+
+  /// For random-allocation NATs: distribute sockets randomly across the
+  /// full ephemeral port range (1024-65535). Each reshuffle picks entirely
+  /// new random ports, maximizing coverage over time.
+  List<int> _pickRandomBirthdayTargets(int count) {
+    final targets = <int>[];
+    final used = <int>{};
+    for (int i = 0; i < count; i++) {
+      int port;
+      do {
+        port = 1024 + _random.nextInt(64512);
+      } while (used.contains(port));
+      used.add(port);
+      targets.add(port);
+    }
+    targets.sort();
+    return targets;
+  }
+
+  void _sendBirthdayPackets(_PeerSendState state) {
+    final targetAddr = InternetAddress(state.targetIp);
+    final byte = Uint8List(1);
+
+    for (int i = 0; i < state.auxSockets.length; i++) {
+      if (i >= state.auxTargetPorts.length) break;
+      byte[0] = _random.nextInt(UdpService.pingMarker);
+      try {
+        state.auxSockets[i].send(byte, targetAddr, state.auxTargetPorts[i]);
+      } catch (_) {}
+    }
+  }
+
+  void _reshuffleBirthdayTargets(_PeerSendState state) {
+    final newTargets =
+        _pickBirthdayTargets(state, state.auxSockets.length);
+    state.auxTargetPorts.clear();
+    state.auxTargetPorts.addAll(newTargets);
+    AppLogger.debug(_tag,
+        'Peer ${state.peerId}: reshuffled birthday targets → '
+        '${newTargets.take(5).join(",")}...');
+  }
+
+  void _onAuxPacketReceived(_PeerSendState state, Datagram datagram) {
+    final ip = datagram.address.address;
+    final port = datagram.port;
+
+    final isPing = datagram.data.length == UdpService.pingPacketSize &&
+        datagram.data[0] == UdpService.pingMarker;
+    if (isPing) {
+      udpService.sendPong(ip, port, datagram.data);
+    }
+
+    if (!state.disconnected) {
+      _handlePeerReply(state, ip, port);
+    }
+  }
+
+  void _closeBirthdaySockets(_PeerSendState state) {
+    state.auxSendTimer?.cancel();
+    state.auxSendTimer = null;
+    state.auxReshuffleTimer?.cancel();
+    state.auxReshuffleTimer = null;
+    for (final socket in state.auxSockets) {
+      try {
+        socket.close();
+      } catch (_) {}
+    }
+    state.auxSockets.clear();
+    state.auxTargetPorts.clear();
   }
 
   void _startTimeoutChecker(_PeerSendState state) {
@@ -376,6 +721,7 @@ class MonitorService {
       state.sendTimer?.cancel();
       state.timeoutChecker?.cancel();
       state.pingTimer?.cancel();
+      _closeBirthdaySockets(state);
       updatePeerStatus?.call(state.peerId, ConnectionStatus.disconnected);
       AppLogger.warning(_tag, 'Peer ${state.peerId} disconnected after max retries');
       return;
@@ -399,6 +745,11 @@ class MonitorService {
     state.startedAt = DateTime.now();
     state.lastReplyAt = null;
     _startPrivateFallbackTimer(state);
+
+    // Re-open birthday sockets for the new reconnect attempt
+    if (state.isSymmetric) {
+      _setupBirthdaySockets(state);
+    }
 
     updatePeerStatus?.call(state.peerId, ConnectionStatus.reconnecting);
     updateReconnectProgress?.call(
@@ -467,13 +818,14 @@ class MonitorService {
       state.fallbackTimer?.cancel();
       state.pingWindow.clear();
       state.smoothedRtt = null;
+      // Close birthday sockets — no longer needed once connected
+      _closeBirthdaySockets(state);
       updateActiveAddress?.call(state.peerId, ip, port);
       updatePeerStatus?.call(state.peerId, ConnectionStatus.connected);
       _startPingLoop(state);
       AppLogger.info(_tag,
           'Peer ${state.peerId} connected via $ip:$port');
     } else if (state.lockedIp != ip || state.lockedPort != port) {
-      // Don't switch locked address between private IPs of a multi-homed peer.
       final samePrivatePort = state.lockedPort == port &&
           state.lockedIp != null &&
           Validators.isPrivateIp(state.lockedIp!) &&
@@ -492,6 +844,7 @@ class MonitorService {
       state.timeoutChecker?.cancel();
       state.pingTimer?.cancel();
       state.fallbackTimer?.cancel();
+      _closeBirthdaySockets(state);
     }
     _peerStates.clear();
     _statsTimer?.cancel();

@@ -15,6 +15,7 @@ class UdpService {
   static const int pingPacketSize = 13;
 
   RawDatagramSocket? _socket;
+  RawDatagramSocket? _socket6;
   void Function(Datagram datagram)? _stunResponseHandler;
 
   /// Called when a non-STUN packet arrives from a peer.
@@ -28,13 +29,41 @@ class UdpService {
   final Random _random = Random();
 
   RawDatagramSocket? get socket => _socket;
+  RawDatagramSocket? get socket6 => _socket6;
   bool get isBound => _socket != null;
+  bool get hasIPv6 => _socket6 != null;
+  int? get port6 => _socket6?.port;
+
+  /// Pick the correct socket for an IP address.
+  RawDatagramSocket? socketFor(String ip) {
+    if (ip.contains(':')) return _socket6;
+    return _socket;
+  }
 
   Future<int> bind({int port = 0}) async {
     _socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
     _socket!.listen(_onData);
-    AppLogger.info(_tag, 'UDP socket bound on port ${_socket!.port}');
-    return _socket!.port;
+    final boundPort = _socket!.port;
+    AppLogger.info(_tag, 'UDP IPv4 socket bound on port $boundPort');
+
+    // Bind IPv6 socket, try same port first
+    try {
+      _socket6 = await RawDatagramSocket.bind(InternetAddress.anyIPv6, boundPort);
+      _socket6!.listen(_onData);
+      AppLogger.info(_tag, 'UDP IPv6 socket bound on port $boundPort');
+    } catch (e) {
+      try {
+        _socket6 = await RawDatagramSocket.bind(InternetAddress.anyIPv6, 0);
+        _socket6!.listen(_onData);
+        AppLogger.info(_tag,
+            'UDP IPv6 socket bound on port ${_socket6!.port} (differs from IPv4)');
+      } catch (e2) {
+        AppLogger.warning(_tag, 'IPv6 socket unavailable: $e2');
+        _socket6 = null;
+      }
+    }
+
+    return boundPort;
   }
 
   /// Ensure the socket is bound. If already bound, returns the existing port.
@@ -84,11 +113,12 @@ class UdpService {
 
   /// Send a 1-byte random packet to the given address.
   void sendRawByte(String ip, int port) {
-    if (_socket == null) return;
+    final sock = socketFor(ip);
+    if (sock == null) return;
     final byte = Uint8List(1);
     byte[0] = _random.nextInt(pingMarker);
     try {
-      _socket!.send(byte, InternetAddress(ip), port);
+      sock.send(byte, InternetAddress(ip), port);
       _lastSendTime = DateTime.now();
     } catch (e) {
       AppLogger.error(_tag, 'Failed to send raw byte to $ip:$port', e);
@@ -97,14 +127,15 @@ class UdpService {
 
   /// Send a ping packet: [0xFE][4B seq][8B timestamp_ms]
   void sendPing(String ip, int port, int seq) {
-    if (_socket == null) return;
+    final sock = socketFor(ip);
+    if (sock == null) return;
     final data = Uint8List(pingPacketSize);
     final bd = ByteData.sublistView(data);
     data[0] = pingMarker;
     bd.setUint32(1, seq);
     bd.setInt64(5, DateTime.now().millisecondsSinceEpoch);
     try {
-      _socket!.send(data, InternetAddress(ip), port);
+      sock.send(data, InternetAddress(ip), port);
       _lastSendTime = DateTime.now();
     } catch (e) {
       AppLogger.error(_tag, 'Failed to send ping to $ip:$port', e);
@@ -113,11 +144,12 @@ class UdpService {
 
   /// Echo a pong back (same payload, marker changed to 0xFF).
   void sendPong(String ip, int port, Uint8List pingData) {
-    if (_socket == null) return;
+    final sock = socketFor(ip);
+    if (sock == null) return;
     final data = Uint8List.fromList(pingData);
     data[0] = pongMarker;
     try {
-      _socket!.send(data, InternetAddress(ip), port);
+      sock.send(data, InternetAddress(ip), port);
       _lastSendTime = DateTime.now();
     } catch (e) {
       AppLogger.error(_tag, 'Failed to send pong to $ip:$port', e);
@@ -134,11 +166,15 @@ class UdpService {
 
   void _onData(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
-    // Drain all pending datagrams. On Android, a single read event may
-    // correspond to multiple buffered datagrams, and no new event is fired
-    // until the buffer is empty.
+    // Drain from both sockets — the event may come from either.
+    _drainSocket(_socket);
+    _drainSocket(_socket6);
+  }
+
+  void _drainSocket(RawDatagramSocket? sock) {
+    if (sock == null) return;
     Datagram? datagram;
-    while ((datagram = _socket?.receive()) != null) {
+    while ((datagram = sock.receive()) != null) {
       if (_isStunMessage(datagram!.data)) {
         _stunResponseHandler?.call(datagram);
       } else {
@@ -176,6 +212,8 @@ class UdpService {
     _keepaliveTimer = null;
     _socket?.close();
     _socket = null;
-    AppLogger.info(_tag, 'UDP socket closed');
+    _socket6?.close();
+    _socket6 = null;
+    AppLogger.info(_tag, 'UDP sockets closed');
   }
 }

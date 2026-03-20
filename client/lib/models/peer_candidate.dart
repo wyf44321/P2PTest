@@ -7,7 +7,9 @@ class PeerCandidate {
 
   const PeerCandidate(this.ip, this.port);
 
-  String get address => '$ip:$port';
+  bool get isIPv6 => ip.contains(':');
+
+  String get address => isIPv6 ? '[$ip]:$port' : '$ip:$port';
 
   Map<String, dynamic> toJson() => {'ip': ip, 'port': port};
 

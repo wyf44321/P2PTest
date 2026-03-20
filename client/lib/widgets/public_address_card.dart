@@ -19,6 +19,7 @@ class PublicAddressCard extends StatelessWidget {
       builder: (context, provider, _) {
         final isLoading = provider.stunStatus == StunStatus.loading;
         final publicAddr = provider.publicAddress;
+        final publicAddr6 = provider.publicAddress6;
         final candidateStr = provider.candidateString;
         final ipLocation = provider.ipLocation;
         final natMeta = provider.natMetadata;
@@ -76,7 +77,7 @@ class PublicAddressCard extends StatelessWidget {
                 const SizedBox(height: 8),
                 _buildAddressRow(
                   context,
-                  label: '公网',
+                  label: 'IPv4',
                   address: publicAddr,
                   copyText: publicAddrCopy,
                   theme: theme,
@@ -109,6 +110,7 @@ class PublicAddressCard extends StatelessWidget {
                     ],
                   ),
                 ],
+                _buildIPv6Section(context, publicAddr6, theme),
                 _buildNatTypeSection(context, provider, theme),
                 if (candidateStr.isNotEmpty) ...[
                   const SizedBox(height: 10),
@@ -164,6 +166,26 @@ class PublicAddressCard extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildIPv6Section(
+    BuildContext context,
+    String publicAddr6,
+    ThemeData theme,
+  ) {
+    if (publicAddr6.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: _buildAddressRow(
+        context,
+        label: 'IPv6',
+        address: publicAddr6,
+        copyText: publicAddr6,
+        theme: theme,
+        compact: true,
+      ),
     );
   }
 
@@ -295,8 +317,9 @@ class PublicAddressCard extends StatelessWidget {
                 if (selfInfo.isSymmetricNat && selfInfo.natPortStep != null) ...[
                   const SizedBox(height: 4),
                   Text(
-                    '端口递增步长 ≈ ${selfInfo.natPortStep}'
-                    '${selfInfo.natPortVelocity != null ? '    漂移速度 ≈ ${selfInfo.natPortVelocity} 端口/秒' : ''}',
+                    '步长≈${selfInfo.natPortStep}'
+                    '${selfInfo.natPortVelocity != null ? '  漂移≈${selfInfo.natPortVelocity}p/s' : ''}'
+                    '${selfInfo.natPortParity != null ? '  端口=${selfInfo.natPortParity == 0 ? "偶数" : "奇数"}' : ''}',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: chipColor.withOpacity(0.8),
                       fontFamily: 'monospace',
@@ -317,6 +340,7 @@ class PublicAddressCard extends StatelessWidget {
     required String address,
     String? copyText,
     required ThemeData theme,
+    bool compact = false,
   }) {
     return Row(
       children: [
@@ -332,18 +356,26 @@ class PublicAddressCard extends StatelessWidget {
         Expanded(
           child: Text(
             address.isNotEmpty ? address : '--',
-            style: theme.textTheme.headlineSmall?.copyWith(
-              fontWeight: FontWeight.w600,
-              fontFamily: 'monospace',
-              color: theme.colorScheme.primary,
-            ),
+            style: compact
+                ? theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w500,
+                    fontFamily: 'monospace',
+                    color: theme.colorScheme.primary,
+                  )
+                : theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    fontFamily: 'monospace',
+                    color: theme.colorScheme.primary,
+                  ),
+            maxLines: compact ? 1 : null,
+            overflow: compact ? TextOverflow.ellipsis : null,
           ),
         ),
         if (address.isNotEmpty)
           IconButton(
             icon: const Icon(Icons.copy, size: 18),
             onPressed: () => _copyAddress(context, copyText ?? address),
-            tooltip: '复制公网地址',
+            tooltip: '复制地址',
             visualDensity: VisualDensity.compact,
           ),
       ],

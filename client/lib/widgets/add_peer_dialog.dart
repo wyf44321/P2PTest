@@ -109,8 +109,8 @@ class _AddPeerDialogState extends State<AddPeerDialog> {
               controller: _controller,
               decoration: const InputDecoration(
                 labelText: '对方地址',
-                hintText: '例: 1.2.3.4:50001|sym,d=2',
-                helperText: '粘贴对方的候选地址，NAT 元数据可省略',
+                hintText: '例: 1.2.3.4:50001 或 [2001:db8::1]:50001',
+                helperText: '支持 IPv4/IPv6，粘贴对方候选地址即可',
                 helperMaxLines: 2,
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.computer),

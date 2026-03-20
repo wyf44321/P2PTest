@@ -4,7 +4,6 @@ import 'package:provider/provider.dart';
 import 'package:p2p_test/app/theme.dart';
 import 'package:p2p_test/providers/peer_provider.dart';
 import 'package:p2p_test/providers/self_info_provider.dart';
-import 'package:p2p_test/models/self_info.dart';
 import 'package:p2p_test/screens/home_screen.dart';
 import 'package:p2p_test/services/ip_geo_service.dart';
 import 'package:p2p_test/services/monitor_service.dart';
@@ -49,6 +48,12 @@ class _P2PTestAppState extends State<P2PTestApp> with WidgetsBindingObserver {
       monitorService: _monitorService,
       ipGeoService: _ipGeoService,
     );
+
+    // Forward our own NAT type to MonitorService so it can adapt sending
+    // strategy (avoid port scanning when we are behind symmetric NAT).
+    _selfInfoProvider.addListener(() {
+      _monitorService.setOwnNatType(_selfInfoProvider.natMetadata);
+    });
 
     _startup();
   }

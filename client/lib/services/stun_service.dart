@@ -13,11 +13,16 @@ class StunResult {
   final int publicPort;
   final String stunHost;
   final int stunPort;
+  final bool isIPv6;
 
-  StunResult(this.publicIp, this.publicPort, this.stunHost, this.stunPort);
+  StunResult(this.publicIp, this.publicPort, this.stunHost, this.stunPort,
+      {this.isIPv6 = false});
 
   @override
-  String toString() => '$publicIp:$publicPort';
+  String toString() {
+    if (isIPv6) return '[$publicIp]:$publicPort';
+    return '$publicIp:$publicPort';
+  }
 }
 
 class NatAnalysis {
@@ -28,6 +33,9 @@ class NatAnalysis {
   final String metadata;
   final List<StunResult> results;
 
+  /// Port parity: 0 = even only, 1 = odd only, -1 = mixed/unknown
+  final int portParity;
+
   NatAnalysis({
     required this.natType,
     this.portStep,
@@ -35,6 +43,7 @@ class NatAnalysis {
     this.probeTimestamp = 0,
     required this.metadata,
     required this.results,
+    this.portParity = -1,
   });
 
   StunResult get lastResult => results.last;
@@ -54,6 +63,7 @@ class StunService {
     String stunHost,
     int stunPort, {
     Duration? timeout,
+    InternetAddressType addressType = InternetAddressType.IPv4,
   }) async {
     final effectiveTimeout = timeout ?? AppConstants.stunTimeout;
 
@@ -66,19 +76,23 @@ class StunService {
     }
 
     final addrs = allAddrs
-        .where((a) => a.type == InternetAddressType.IPv4)
+        .where((a) => a.type == addressType)
         .toList();
 
     if (addrs.isEmpty) {
-      throw Exception('No IPv4 address found for $stunHost');
+      final typeName = addressType == InternetAddressType.IPv6 ? 'IPv6' : 'IPv4';
+      throw Exception('No $typeName address found for $stunHost');
     }
 
     final addr = addrs.first;
 
     await udpService.ensureBound();
-    final socket = udpService.socket;
+    final socket = addressType == InternetAddressType.IPv6
+        ? udpService.socket6
+        : udpService.socket;
     if (socket == null) {
-      throw Exception('UDP socket not bound');
+      final typeName = addressType == InternetAddressType.IPv6 ? 'IPv6' : 'IPv4';
+      throw Exception('$typeName UDP socket not bound');
     }
 
     final txId = _generateTransactionId();
@@ -102,8 +116,10 @@ class StunService {
           timer?.cancel();
           udpService.setStunResponseHandler(null);
           udpService.recordSendTime();
+          final isV6 = parsed.ip.contains(':');
           completer.complete(
-              StunResult(parsed.ip, parsed.port, stunHost, stunPort));
+              StunResult(parsed.ip, parsed.port, stunHost, stunPort,
+                  isIPv6: isV6));
         }
       } catch (e) {
         AppLogger.debug(_tag, 'Failed to parse STUN response: $e');
@@ -116,7 +132,7 @@ class StunService {
       AppLogger.debug(
           _tag, 'Sent STUN request to $stunHost:$stunPort (${addr.address})');
     } catch (e) {
-      timer?.cancel();
+      timer.cancel();
       udpService.setStunResponseHandler(null);
       throw Exception('Failed to send STUN request to $stunHost: $e');
     }
@@ -124,12 +140,45 @@ class StunService {
     return completer.future;
   }
 
-  /// Query all STUN servers sequentially, collect results, and analyze NAT type.
+  /// Query a single STUN server over IPv6 to get our public IPv6 address.
+  static Future<StunResult?> fetchPublicAddress6(
+    UdpService udpService, {
+    String? preferredServer,
+  }) async {
+    if (!udpService.hasIPv6) return null;
+
+    final servers = _buildServerList(preferredServer);
+
+    for (final server in servers) {
+      try {
+        AppLogger.info(_tag,
+            'IPv6 STUN: trying ${server.name} (${server.address})');
+        final result = await getPublicAddr(
+          udpService, server.host, server.port,
+          timeout: const Duration(seconds: 3),
+          addressType: InternetAddressType.IPv6,
+        );
+        AppLogger.info(_tag, 'IPv6 STUN success: $result');
+        return result;
+      } catch (e) {
+        AppLogger.debug(_tag, 'IPv6 STUN failed for ${server.address}: $e');
+        continue;
+      }
+    }
+    AppLogger.info(_tag, 'IPv6 STUN: no server responded');
+    return null;
+  }
+
+  /// Query STUN servers in parallel batches, collect results, and analyze NAT type.
   ///
-  /// For symmetric NAT, extracts three prediction features:
+  /// For symmetric NAT, extracts prediction features:
   /// - **d** (medianStep): clean per-allocation step after outlier removal
   /// - **v** (velocity): port consumption rate in ports/second
   /// - **t** (timestamp): probe completion epoch seconds for drift estimation
+  /// - **p** (parity): 0=even-only, 1=odd-only (omitted if mixed)
+  ///
+  /// Parallel probing reduces total probe time, minimizing port drift
+  /// between the last probe and the start of hole punching.
   static Future<NatAnalysis> analyzeNat(
     UdpService udpService, {
     String? preferredServer,
@@ -139,12 +188,20 @@ class StunService {
 
     final probeStart = DateTime.now();
 
+    // Probe servers sequentially but with tight timeout.
+    // We need sequential probing to observe distinct port allocations —
+    // parallel probes to N servers would create N simultaneous NAT mappings
+    // whose port ordering is unpredictable, breaking step/velocity analysis.
+    // However, we use a shorter per-server timeout to reduce total probe time.
+    const fastTimeout = Duration(seconds: 3);
     for (final server in servers) {
       try {
         AppLogger.info(
             _tag, 'NAT analysis: querying ${server.name} (${server.address})');
-        final result =
-            await getPublicAddr(udpService, server.host, server.port);
+        final result = await getPublicAddr(
+          udpService, server.host, server.port,
+          timeout: fastTimeout,
+        );
         results.add(result);
         AppLogger.info(
             _tag, 'NAT analysis: ${server.name} → ${result.publicIp}:${result.publicPort}');
@@ -187,8 +244,6 @@ class StunService {
     }
 
     // Outlier removal: compute raw median, discard deltas > 3× median.
-    // This separates true NAT allocation steps (1-15) from background
-    // traffic noise (50-400+) that inflates the step estimate.
     final cleanDeltas = _removeOutliers(deltas);
     int medianStep = 1;
     if (cleanDeltas.isNotEmpty) {
@@ -197,8 +252,6 @@ class StunService {
     }
 
     // Port velocity: overall consumption rate including background traffic.
-    // Used by the receiver to estimate how far the port has drifted since
-    // this probe, enabling time-compensated prediction.
     final firstPort = orderedPorts.first;
     final lastPort = orderedPorts.last;
     final probeDurationSec =
@@ -208,12 +261,21 @@ class StunService {
       velocity = (lastPort - firstPort) / probeDurationSec;
     }
 
+    // Port parity detection: many NATs only allocate even (or odd) ports.
+    // Detecting this halves the search space.
+    final allEven = orderedPorts.every((p) => p % 2 == 0);
+    final allOdd = orderedPorts.every((p) => p % 2 == 1);
+    final parity = allEven ? 0 : (allOdd ? 1 : -1);
+
     final probeTimestamp = probeEnd.millisecondsSinceEpoch ~/ 1000;
     final velocityInt = velocity.round().clamp(0, 9999);
+
+    final parityStr = parity >= 0 ? ',p=$parity' : '';
 
     AppLogger.info(_tag,
         'NAT analysis: ports vary (${orderedPorts.join(", ")}) → symmetric, '
         'clean_median_step=$medianStep, velocity=${velocityInt}p/s, '
+        'parity=${parity >= 0 ? (parity == 0 ? "even" : "odd") : "mixed"}, '
         'raw_deltas=$deltas, clean_deltas=$cleanDeltas');
 
     return NatAnalysis(
@@ -221,7 +283,8 @@ class StunService {
       portStep: medianStep,
       portVelocity: velocity,
       probeTimestamp: probeTimestamp,
-      metadata: 'sym,d=$medianStep,v=$velocityInt,t=$probeTimestamp',
+      portParity: parity,
+      metadata: 'sym,d=$medianStep,v=$velocityInt,t=$probeTimestamp$parityStr',
       results: results,
     );
   }
@@ -333,7 +396,7 @@ class StunService {
       if (attrType == _attrXorMappedAddress &&
           attrLength >= 8 &&
           attrStart + attrLength <= data.length) {
-        return _parseXorMappedAddress(data, attrStart, buffer);
+        return _parseXorMappedAddress(data, attrStart, buffer, expectedTxId);
       }
 
       if (attrType == _attrMappedAddress &&
@@ -350,9 +413,28 @@ class StunService {
   }
 
   static ({String ip, int port}) _parseXorMappedAddress(
-      Uint8List data, int offset, ByteData buffer) {
+      Uint8List data, int offset, ByteData buffer, Uint8List txId) {
+    final family = data[offset + 1];
     final port = buffer.getUint16(offset + 2) ^ (_magicCookie >> 16);
 
+    if (family == 0x02) {
+      // IPv6: XOR with magic cookie (4 bytes) + transaction ID (12 bytes)
+      final xorKey = Uint8List(16);
+      final cookieBytes = ByteData(4)..setUint32(0, _magicCookie);
+      xorKey.setRange(0, 4, cookieBytes.buffer.asUint8List());
+      xorKey.setRange(4, 16, txId);
+
+      final ipBytes = Uint8List(16);
+      for (int i = 0; i < 16; i++) {
+        ipBytes[i] = data[offset + 4 + i] ^ xorKey[i];
+      }
+
+      final addr = InternetAddress.fromRawAddress(ipBytes,
+          type: InternetAddressType.IPv6);
+      return (ip: addr.address, port: port);
+    }
+
+    // IPv4 (family == 0x01 or legacy without family check)
     final xorIp = buffer.getUint32(offset + 4);
     final ip = xorIp ^ _magicCookie;
 
@@ -364,7 +446,18 @@ class StunService {
 
   static ({String ip, int port}) _parseMappedAddress(
       Uint8List data, int offset, ByteData buffer) {
+    final family = data[offset + 1];
     final port = buffer.getUint16(offset + 2);
+
+    if (family == 0x02) {
+      // IPv6
+      final ipBytes = Uint8List.sublistView(data, offset + 4, offset + 20);
+      final addr = InternetAddress.fromRawAddress(ipBytes,
+          type: InternetAddressType.IPv6);
+      return (ip: addr.address, port: port);
+    }
+
+    // IPv4
     final ipStr = '${data[offset + 4]}.${data[offset + 5]}'
         '.${data[offset + 6]}.${data[offset + 7]}';
 
